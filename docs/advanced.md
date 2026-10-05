@@ -47,14 +47,16 @@ PostgreSQL、Docker 面板、自定义数据库路径、Surge/Sing-box 等专用
 
 | 类别 | 权限 | 级别 |
 | --- | --- | --- |
-| Account | Workers Scripts | Edit |
+| Account | Workers | 管理员（Admin） |
 | Zone | Zone | Read |
 | Zone | DNS | Edit |
 | Zone | Workers Routes | Edit |
 | Zone | Origin Rules | Edit |
-| Zone | Config Settings | Edit |
+| Zone | Config Rules | Edit |
 
 Account Resources 选择域名所在的账号；Zone Resources 选择节点与订阅域名所在的主域名，例如 `example.com`。仅 DNS 编辑权限并不能代替 `Zone → Zone → Read`。
+
+新版 Workers 权限需要产品级 `Workers → Admin` 才能创建/删除 Worker，不能只选 Editor。旧版 `Workers Scripts` 名称可能仍出现在权限列表中；新建令牌请按新版选择。配置规则在当前控制台显示为 `Config Rules`，API 文档也可能称为 `Config Settings`。依据：[Workers 角色与创建权限](https://developers.cloudflare.com/workers/authorization/workers/)。
 
 控制台与 API 权限名称可能显示为 Edit 或 Write。配置规则/回源规则有套餐额度限制，额度不足会报错并清理本次部署，不会删除你的现有规则来腾额度。
 

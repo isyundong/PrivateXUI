@@ -93,8 +93,8 @@ def install_questions(state_path, report, installed):
         print('已取消。')
         return None
     print('\n接下来输入 Cloudflare API Token（不是 Global API Key；隐藏输入，不保存到本地）。')
-    print('权限：Account → Workers Scripts → Edit；Zone → Zone → Read，')
-    print('      Zone → DNS / Workers Routes / Origin Rules / Config Settings → Edit。')
+    print('权限：Account → Workers → 管理员（Admin）；Zone → Zone → Read，')
+    print('      Zone → DNS / Workers Routes / Origin Rules / Config Rules → Edit。')
     print('资源范围需包含这两个域名所属的 Zone 和账号；若设置 IP 限制，需允许 VPS 的出口 IP。')
     return argparse.Namespace(command='install', state=state_path, node_domain=node, sub_domain=subscription,
                               ipv4=address, protocols=protocols, preferred=preferred, fresh=not installed)
