@@ -41,14 +41,45 @@ PostgreSQL、Docker 面板、自定义数据库路径、Surge/Sing-box 等专用
 
 使用 API Token，**不使用 Global API Key**。运行时隐藏输入，工具不会把 Cloudflare Token 写入状态文件或上传给 Worker。
 
-请把资源限制到自己的账号和涉及的 Zone，并授予这些操作所需权限：
+在 [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建 Custom Token，只复制创建完成后显示的 Token 本身，不要复制整段 curl 命令、`Bearer`、Token ID 或 Global API Key。已有令牌也可以核对并调整授权策略。
 
-- 账号：Workers Scripts 编辑权限。
-- Zone：Zone 读取、DNS 编辑、Workers Routes 编辑、Origin Rules 编辑、Config Settings 编辑。
+请把资源限制到自己的账号和涉及的 Zone，并配置以下权限：
+
+| 类别 | 权限 | 级别 |
+| --- | --- | --- |
+| Account | Workers Scripts | Edit |
+| Zone | Zone | Read |
+| Zone | DNS | Edit |
+| Zone | Workers Routes | Edit |
+| Zone | Origin Rules | Edit |
+| Zone | Config Settings | Edit |
+
+Account Resources 选择域名所在的账号；Zone Resources 选择节点与订阅域名所在的主域名，例如 `example.com`。仅 DNS 编辑权限并不能代替 `Zone → Zone → Read`。
 
 控制台与 API 权限名称可能显示为 Edit 或 Write。配置规则/回源规则有套餐额度限制，额度不足会报错并清理本次部署，不会删除你的现有规则来腾额度。
 
 权限依据：[Workers 权限](https://developers.cloudflare.com/workers/authorization/workers/)、[Token 权限列表](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)、[Origin Rules API](https://developers.cloudflare.com/rules/origin-rules/create-api/)。
+
+### Cloudflare 403 / 9109
+
+这表示 Cloudflare 拒绝了认证或授权，仅凭错误码不能确定具体原因。新版会保留识别到的安全认证说明，例如 `Invalid access token` 或客户端 IP 限制拒绝；不会原样打印可能包含密钥的完整 API 错误响应。
+
+1. 确认输入的是正确的 API Token，本工具不接受 Global API Key。确认令牌未撤销、未过期且已到生效时间。
+2. 若在 Client IP Address Filtering 中设置了限制，需要允许 **VPS 实际向 Cloudflare 请求时使用的出口 IP**。只允许你电脑的 IP 会导致 VPS 请求被拒绝；VPS 的 IPv6 或代理出口也可能不同于界面检测的 IPv4。应按真实出口调整允许范围。
+3. 检查 `Zone → Zone → Read` 以及 Zone Resources 是否包含目标主域名，再核对上表的部署权限。
+4. 若设置了 `CF_API_TOKEN` 环境变量，工具会优先使用它。要重新粘贴令牌，先在当前 shell 执行 `unset CF_API_TOKEN`。
+
+可以先进行只读检查，不必重复填写整套安装参数：
+
+```bash
+private-xui check-cloudflare --domain node.example.com
+```
+
+或使用菜单 **9**。它只读取域名列表和检查目标 Zone 是否可见，不创建状态文件，也不修改面板、节点或 Cloudflare 资源。读取成功仅说明这一步的认证和读取权限可用，不能保证所有后续写入权限都具备。
+
+如果失败发生在首次 `GET /zones`，还未安装面板或创建节点，不需要卸载。只有状态标记为未完成部署时才应执行清理；已完成的部署不会因一次凭据错误而需要卸载。
+
+官方说明：[创建 Token、资源与 IP/TTL 限制](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)、[认证排查](https://developers.cloudflare.com/fundamentals/api/troubleshooting/)、[List Zones 所需权限](https://developers.cloudflare.com/api/resources/zones/methods/list/)。
 
 ## 安装
 

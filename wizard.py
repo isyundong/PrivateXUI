@@ -27,6 +27,24 @@ def confirm(label, *, default=False):
     return choice in ('y', 'yes') or (not choice and default)
 
 
+def recovery_hint(state_path):
+    """Base recovery advice on durable state, not on every arbitrary exception."""
+    if not Path(state_path).exists():
+        return '没有本工具的节点/Cloudflare 部署状态，无需执行卸载；请修正错误后重试。'
+    try:
+        state = json.loads(Path(state_path).read_text())
+        status = state.get('status')
+    except (OSError, ValueError, AttributeError):
+        return '恢复状态暂时无法读取，请保留状态文件并检查文件内容/权限，不要直接删除。'
+    if status in ('installing', 'incomplete', 'cleanup-needed'):
+        return '检测到未完成部署，请选择“卸载”重试清理；恢复状态会保留。'
+    if status == 'update-pending':
+        return '有待完成的 Worker 更新，请选择“更新订阅服务”重试，将复用待更新令牌；无需卸载。'
+    if status == 'ready':
+        return '原部署状态仍为已完成；请先修正本次错误，不要仅因凭据错误而卸载已有节点。'
+    return '请保留状态文件，先核对部署状态和本次错误。'
+
+
 def panel_information():
     import xui_backend as xui
     path = Path(xui.PANEL_INFO_PATH)
@@ -74,8 +92,10 @@ def install_questions(state_path, report, installed):
     if not confirm('开始部署', default=True):
         print('已取消。')
         return None
-    print('\n接下来输入 Cloudflare API Token（隐藏输入，不保存到本地）。')
-    print('权限：Workers Scripts 编辑；Zone 读取、DNS / Workers Routes / Origin Rules / Config Settings 编辑。')
+    print('\n接下来输入 Cloudflare API Token（不是 Global API Key；隐藏输入，不保存到本地）。')
+    print('权限：Account → Workers Scripts → Edit；Zone → Zone → Read，')
+    print('      Zone → DNS / Workers Routes / Origin Rules / Config Settings → Edit。')
+    print('资源范围需包含这两个域名所属的 Zone 和账号；若设置 IP 限制，需允许 VPS 的出口 IP。')
     return argparse.Namespace(command='install', state=state_path, node_domain=node, sub_domain=subscription,
                               ipv4=address, protocols=protocols, preferred=preferred, fresh=not installed)
 
@@ -99,8 +119,9 @@ def menu(state_path):
             print('  6. 更换订阅令牌')
             print('  7. 重新检查环境和 IP')
             print('  8. 查看 x-ui 管理命令')
+            print('  9. 检查 Cloudflare 凭据和域名权限（只读）')
             print('  0. 退出')
-            choice = input('请选择 [0-8]: ').strip()
+            choice = input('请选择 [0-9]: ').strip()
             if choice == '0':
                 return
             if choice == '1':
@@ -131,8 +152,11 @@ def menu(state_path):
                 require_supported(report)
             elif choice == '8':
                 print('服务器执行 x-ui 可进入面板管理菜单；执行 private-xui 可返回本工具。')
+            elif choice == '9':
+                domain = ask('待检查的域名（可选，回车只查域名列表）', m.hostname, allow_empty=True)
+                m.check_cloudflare(domain)
             else:
-                print('请输入 0 到 8。')
+                print('请输入 0 到 9。')
         except FileNotFoundError:
             print('未找到部署状态或文件，请先安装，或检查输入的文件路径。')
         except KeyboardInterrupt:
@@ -141,4 +165,4 @@ def menu(state_path):
             return
         except (ValueError, OSError, RuntimeError, KeyError, SystemExit) as exc:
             print('操作未完成：%s' % exc)
-            print('如有失败部署，请选择“卸载”重试清理；恢复状态会保留。')
+            print(recovery_hint(state_path))

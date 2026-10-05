@@ -119,6 +119,32 @@ class WizardTests(unittest.TestCase):
         inspect.assert_not_called()
         cf.assert_not_called()
 
+    def test_cloudflare_diagnostic_is_read_only_and_checks_requested_zone(self):
+        cf = Mock()
+        cf.listing.return_value = [{'name': 'example.com', 'id': 'zone'}]
+        with patch.object(m, 'cf_client', return_value=cf), patch.object(m, 'run_command') as run, patch.object(m, 'lock') as lock:
+            m.main(['--state', self.state, 'check-cloudflare', '--domain', 'node.example.com'])
+        cf.listing.assert_called_once_with('/zones')
+        cf.call.assert_not_called()
+        run.assert_not_called()
+        lock.assert_not_called()
+        self.assertFalse(Path(self.state).exists())
+
+    def test_no_state_auth_failure_does_not_advise_uninstall(self):
+        self.assertIn('无需执行卸载', wizard.recovery_hint(self.state))
+
+    def test_recovery_guidance_distinguishes_ready_cleanup_and_pending_update(self):
+        import json
+        cases = [('ready', '不要仅因凭据错误'), ('cleanup-needed', '选择“卸载”'), ('update-pending', '更新订阅服务')]
+        for status, expected in cases:
+            Path(self.state).write_text(json.dumps({'status': status}))
+            self.assertIn(expected, wizard.recovery_hint(self.state))
+
+    def test_corrupt_state_is_preserved_and_not_mistaken_for_no_deployment(self):
+        Path(self.state).write_text('invalid JSON')
+        self.assertIn('不要直接删除', wizard.recovery_hint(self.state))
+        self.assertEqual(Path(self.state).read_text(), 'invalid JSON')
+
 
 class DistributionTests(unittest.TestCase):
     def test_zipapp_contains_and_reads_worker_without_source_directory(self):

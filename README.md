@@ -48,6 +48,7 @@ VPS 需放行 **TCP `22`（SSH）、`17001`（VLESS）、`17002`（Trojan）、`
 6. 更换订阅令牌
 7. 重新检查环境和 IP
 8. 查看 x-ui 管理命令
+9. 检查 Cloudflare 凭据和域名权限（只读）
 0. 退出
 ```
 
@@ -68,5 +69,7 @@ private-xui
 ```
 
 非 root 用户使用 `sudo private-xui`。订阅地址包含访问权限，请勿公开分享。新面板默认仅监听服务器本机，菜单 **4** 会显示 SSH 隧道访问方法。节点回源方式、Token 权限、迁移与故障处理见 [详细说明](docs/advanced.md)。
+
+遇到 Cloudflare `403 / 9109` 时，先选择菜单 **9** 做只读检查，再按 [Token 排查说明](docs/advanced.md#cloudflare-403--9109) 检查凭据、资源权限和 IP 限制。首次读取域名列表失败时，还未部署节点，无需卸载。
 
 开发者：[测试与构建](docs/development.md) · [上游来源](docs/advanced.md#代码来源与接口依据)

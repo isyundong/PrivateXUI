@@ -314,6 +314,43 @@ class FixedPortTests(unittest.TestCase):
 
 
 class APIClientTests(unittest.TestCase):
+    def test_9109_preserves_known_error_and_explains_zone_read_requirement(self):
+        cf = Cloudflare('fake-secret')
+        body = {'errors': [{'code': 9109, 'message': 'Invalid access token'}]}
+        cf.opener.open = Mock(side_effect=HTTPError('https://example.com', 403, 'failure', {}, io.BytesIO(json.dumps(body).encode())))
+        with self.assertRaises(APIError) as caught:
+            cf.listing('/zones')
+        message = str(caught.exception)
+        self.assertIn('Invalid access token', message)
+        self.assertIn('Zone → Zone → Read', message)
+        self.assertIn('Global API Key', message)
+        self.assertNotIn('fake-secret', message)
+
+    def test_9109_location_restriction_is_distinguished_from_invalid_token(self):
+        cf = Cloudflare('fake-secret')
+        body = {'errors': [{'code': 9109, 'message': 'Cannot use the access token from location: 192.0.2.10'}]}
+        cf.opener.open = Mock(side_effect=HTTPError('https://example.com', 403, 'failure', {}, io.BytesIO(json.dumps(body).encode())))
+        with self.assertRaises(APIError) as caught:
+            cf.listing('/zones')
+        self.assertIn('客户端 IP 限制拒绝了请求来源：192.0.2.10', str(caught.exception))
+        self.assertNotIn('Invalid access token', str(caught.exception))
+
+    def test_unknown_api_error_does_not_echo_credential_or_worker_secret(self):
+        cf = Cloudflare('fake-secret')
+        body = {'errors': [{'code': 10021, 'message': 'invalid binding: fake-secret and fake-node-uuid'}]}
+        cf.opener.open = Mock(side_effect=HTTPError('https://example.com', 400, 'failure', {}, io.BytesIO(json.dumps(body).encode())))
+        with self.assertRaises(APIError) as caught:
+            cf.call('PUT', '/accounts/account/workers/scripts/test')
+        self.assertNotIn('fake-secret', str(caught.exception))
+        self.assertNotIn('fake-node-uuid', str(caught.exception))
+        self.assertIn('10021', str(caught.exception))
+
+    def test_pasted_header_or_multiline_token_is_rejected_without_echoing_it(self):
+        for value in ('Bearer fake-secret', 'fake-secret\nother', '"fake-secret"', 'Authorization: Bearer fake-secret'):
+            with self.assertRaises(ValueError) as caught:
+                Cloudflare(value)
+            self.assertNotIn('fake-secret', str(caught.exception))
+
     def test_missing_ruleset_differs_from_server_or_auth_error(self):
         cf = Cloudflare('fake-secret')
         for status in (403, 429, 500):

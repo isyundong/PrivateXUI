@@ -96,8 +96,25 @@ def best_zone(zones, domain):
 
 
 def cf_client():
-    token = os.environ.get('CF_API_TOKEN', '').strip() or getpass('Cloudflare API Token（隐藏输入）: ').strip()
+    token = os.environ.get('CF_API_TOKEN', '').strip()
+    if token:
+        print('使用环境变量 CF_API_TOKEN；如需重新输入，请先执行 unset CF_API_TOKEN。')
+    else:
+        token = getpass('Cloudflare API Token（只粘贴令牌本身，隐藏输入）: ').strip()
     return Cloudflare(token)
+
+
+def check_cloudflare(domain=None):
+    if domain:
+        domain = hostname(domain)
+    cf = cf_client()
+    print('正在只读检查 Cloudflare 域名列表访问权限……')
+    zones = cf.listing('/zones')
+    print(f'域名列表读取成功，可访问 {len(zones)} 个 Zone。')
+    if domain:
+        zone = best_zone(zones, domain)
+        print(f'{domain} 匹配到授权 Zone：{zone["name"]}')
+    print('此检查没有修改节点、DNS、Worker 或部署状态；读取成功不代表所有写入权限已通过。')
 
 
 def panel_for(backend=None):
@@ -369,6 +386,8 @@ def parser():
     check.add_argument('--local-only', action='store_true', help='只检查本机环境，不查询公网 IP')
     check.add_argument('--quiet', action='store_true', help='检查通过时不输出')
     commands.add_parser('panel', help='查看本工具保存的面板访问信息')
+    cloud = commands.add_parser('check-cloudflare', help='只读检查 Cloudflare 凭据和域名访问权限')
+    cloud.add_argument('--domain', help='可选：检查节点域名所在 Zone 是否在授权范围内')
     return result
 
 
@@ -409,6 +428,9 @@ def main(argv=None):
         if args.command == 'panel':
             from wizard import panel_information
             panel_information()
+            return
+        if args.command == 'check-cloudflare':
+            check_cloudflare(args.domain)
             return
         if args.command == 'install':
             report = inspect_server(lookup_ip=not args.ipv4)
