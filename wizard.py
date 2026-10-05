@@ -131,6 +131,95 @@ def panel_status(installed):
         return '已安装 · 运行状态待检查'
 
 
+def domain_only(state):
+    return state.get('preferred_mode') != 'auto' and not state.get('preferred')
+
+
+def dashboard_state(state_path, report, installed):
+    """A credential-free view model; green deployment badges mean local state only."""
+    import manage as m
+    panel = panel_status(installed)
+    panel_tone = ('good' if '运行中' in panel else 'danger' if '服务未运行' in panel else 'warning')
+    model = {
+        'server': {'title': '服务器 / 3x-ui', 'badge': (panel, panel_tone), 'rows': [
+            ('系统', report['system'], ''), ('IPv4', report.get('ipv4') or '待填写', ''),
+            ('架构', report.get('architecture', '待检查'), 'muted'),
+        ]},
+        'deployment': {'title': '节点 / 订阅', 'badge': ('尚未部署', 'warning'), 'rows': [
+            ('节点', '尚未配置', 'muted'), ('订阅', '尚未配置', 'muted'), ('入口', '尚未配置', 'muted'),
+        ]},
+        'notice': {'title': '下一步 · 首次部署', 'tone': 'warning', 'lines': [
+            '配置你的节点域名和订阅域名，启用自动优选。',
+            '选择「部署」开始；输入完成后才会执行安装。',
+        ]},
+        'focus': 'install',
+    }
+    if not Path(state_path).exists():
+        return model
+    try:
+        state = m.load(state_path)
+    except (OSError, ValueError, AttributeError):
+        model['deployment']['badge'] = ('状态文件读取失败', 'danger')
+        model['notice'] = {'title': '需要处理 · 恢复记录异常', 'tone': 'danger', 'lines': [
+            '请保留状态文件，暂时不要重复安装或删除配置。', '在「维护」检查环境，修复状态后继续。',
+        ]}
+        model['focus'] = 'maintenance'
+        return model
+    status = state.get('status')
+    labels = {'ready': '已部署 · 本机记录', 'installing': '安装未完成', 'incomplete': '安装未完成',
+              'cleanup-needed': '清理未完成', 'update-pending': '更新待恢复'}
+    model['deployment']['badge'] = (labels.get(status, '状态待检查'), 'good' if status == 'ready' else 'warning')
+    if state.get('preferred_mode') == 'auto':
+        entry, entry_tone = '自动优选 · 动态生成', 'good'
+    elif domain_only(state):
+        entry, entry_tone = '仅域名 · 未启用优选', 'warning'
+    else:
+        entry = ('固定候选' if state.get('preferred_mode') == 'builtin' else '自有入口') + ' · %s 条配置' % subscription_count(state)
+        entry_tone = 'accent'
+    model['deployment']['rows'] = [
+        ('节点', state.get('domain') or '未配置', ''),
+        ('订阅', state.get('subscription_domain') or '未配置', ''),
+        ('入口', entry, entry_tone),
+    ]
+    ports = ' / '.join(str(route.get('port', '')) for route in state.get('routes', []))
+    if ports:
+        model['server']['rows'][-1] = ('回源', ports, 'muted')
+    model['focus'] = 'subscription'
+    if status != 'ready':
+        task = '维护 → 更新订阅服务' if status == 'update-pending' else '维护 → 卸载 / 清理未完成部署'
+        model['notice'] = {'title': '需要处理 · ' + labels.get(status, '部署待检查'), 'tone': 'warning', 'lines': [
+            '已保留恢复记录，请先处理当前状态。', task,
+        ]}
+        model['focus'] = 'maintenance'
+    elif domain_only(state):
+        model['notice'] = {'title': '尚未启用自动优选', 'tone': 'warning', 'lines': [
+            '当前仅域名入口；不会自动扩展优选节点。',
+            '按 A 打开设置，或 维护 → 订阅设置 → 自动优选',
+        ], 'compact_lines': [
+            '当前仅域名入口，自动优选未启用。',
+            '按 A 打开自动优选设置（确认后生效）',
+        ]}
+        model['focus'] = 'maintenance'
+        model['shortcut'] = 'auto-settings'
+    elif state.get('preferred_mode') == 'auto':
+        model['notice'] = {'title': '自动优选已配置', 'tone': 'good', 'lines': [
+            '公开域名池 + 动态 IP；数量以客户端更新后的订阅为准。',
+            '选择「订阅」复制地址；实际连通性可在「维护」检查。',
+        ]}
+    else:
+        model['notice'] = {'title': '订阅已配置', 'tone': 'accent', 'lines': [
+            '当前使用自选入口；切换自动优选需在设置中确认。',
+            '选择「订阅」复制地址，或到「维护」更改入口。',
+        ]}
+    if installed and panel_tone == 'danger':
+        model['notice'] = {'title': '需要处理 · 3x-ui 服务未运行', 'tone': 'danger', 'lines': [
+            '节点进程可能不可用，请先检查服务状态。',
+            '在服务器执行 systemctl status x-ui 查看原因。',
+        ]}
+        model['focus'] = 'maintenance'
+    return model
+
+
 def status_lines(state_path, report, installed):
     """Never include credentials in the persistent dashboard."""
     import manage as m
@@ -146,10 +235,13 @@ def status_lines(state_path, report, installed):
               'cleanup-needed': '清理未完成', 'update-pending': '订阅更新待恢复'}
     lines.append('本项目   %s（本机记录）' % labels.get(state.get('status'), '状态待检查'))
     count = subscription_count(state)
-    quantity = '动态优选 · 数量以订阅为准' if count is None else '%s 条节点配置' % count
+    quantity = ('动态优选 · 数量以订阅为准' if count is None else
+                '仅域名入口 · 尚未启用自动优选' if domain_only(state) else '%s 条节点配置' % count)
     lines.append('订阅     %s · %s' % (state.get('subscription_domain', '未配置'), quantity))
     protocols = ' / '.join(str(route.get('protocol', '')).upper() for route in state.get('routes', []))
     lines.append('节点     %s · %s' % (state.get('domain', '未配置'), protocols or '未创建'))
+    if domain_only(state):
+        lines.append('下一步   维护 → 订阅设置 → 自动优选')
     return lines
 
 
@@ -162,6 +254,9 @@ def show_subscription(state_path):
     count = subscription_count(state)
     if count is None:
         print('自动优选：节点数量随公开地址池变化，以客户端更新后的订阅为准。')
+    elif domain_only(state):
+        print('当前仅域名入口，共 %s 种协议；尚未启用自动优选。' % len(state.get('routes', [])))
+        print('启用路径：维护 → 订阅设置 → 自动优选。')
     else:
         print('共 %s 条节点配置；不同 CF 入口共用同一台 VPS。' % count)
     print('\n' + m.subscription_url(state))
@@ -194,12 +289,12 @@ class GuidedUI:
         import tui
         while True:
             installed = m.xui.is_xui_installed()
-            selected = self.ui.choose('开始', [
+            selected = self.ui.home(dashboard_state(self.state_path, self.report, installed), [
                 ('install', '部署', '首次安装节点和私有订阅；已有部署会保留'),
                 ('subscription', '订阅', '查看完整 Clash / Mihomo 订阅地址'),
                 ('maintenance', '维护', '更新、订阅设置、连接检查与清理'),
                 ('exit', '退出', '退出 Private XUI，已部署的服务继续运行'),
-            ], summary=status_lines(self.state_path, self.report, installed), back=False)
+            ])
             if selected in (None, 'exit'):
                 return
             try:
@@ -207,6 +302,8 @@ class GuidedUI:
                     self.install(installed)
                 elif selected == 'subscription':
                     self.task(lambda: show_subscription(self.state_path))
+                elif selected == 'auto-settings':
+                    self.settings(suggest_auto=True)
                 else:
                     self.maintenance()
             except tui.Cancelled:
@@ -274,18 +371,20 @@ class GuidedUI:
                                                '清理本项目节点、Worker、DNS 和规则。', '保留 3x-ui 面板及其他节点。'], destructive=True):
                     self.command('uninstall')
 
-    def settings(self):
+    def settings(self, *, suggest_auto=False):
         import manage as m
         state = m.load(self.state_path)
-        name = self.ui.ask('订阅设置', '客户端显示的订阅名称', subscription_name,
-                           default=state.get('subscription_name') or 'Private XUI')
+        name = state.get('subscription_name') or 'Private XUI'
+        if not suggest_auto:
+            name = self.ui.ask('订阅设置', '客户端显示的订阅名称', subscription_name, default=name)
         mode = self.ui.choose('订阅入口', [
             ('keep', '保留当前入口', '只修改名称；保留现有自定义地址'),
             ('auto', '自动优选（推荐）', '公开域名池 + 动态 IP；不向公开源发送节点凭据'),
             ('builtin', '内置 Cloudflare 候选', '固定候选 + 域名入口；客户端测延迟，共用同一 VPS'),
             ('direct', '仅节点域名', '每个已安装协议生成 1 条节点配置'),
             ('custom', '导入自有地址文件', '高级选项：使用已有的优选 JSON 文件'),
-        ], summary=['候选入口需要客户端测速，不保证每个网络都可用。'])
+        ], summary=['候选入口需要客户端测速，不保证每个网络都可用。'],
+           initial='auto' if suggest_auto else 'keep')
         if mode is None:
             return
         preferred = None

@@ -59,6 +59,7 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual(tui.cell_width('A中e\u0301'), 4)
         self.assertEqual(tui.fit('A中文', 4), 'A中')
         self.assertEqual(tui.tail('A中文', 4), '中文')
+        self.assertEqual(tui.elide('node.example.com', 8), 'node.ex…')
         self.assertNotIn('\x1b', tui.clean_text('\x1b[31mhello'))
         self.assertNotIn('\n', tui.clean_text('first\nsecond'))
 
@@ -78,6 +79,32 @@ class TerminalTests(unittest.TestCase):
         ui, screen = self.ui(['1', '\x1b'], (10, 30))
         self.assertIsNone(ui.choose('菜单', [('one', '操作', '')]))
         self.assertTrue(any('终端太小' in row[2] for row in screen.writes))
+
+    def test_home_has_bordered_cards_and_high_contrast_focus_at_multiple_sizes(self):
+        model = {'server': {'title': '服务器 / 3x-ui', 'badge': ('已安装 · 运行中', 'good'),
+                            'rows': [('系统', 'Ubuntu 22.04 LTS', ''), ('IPv4', '1.1.1.1', ''), ('回源', '17001 / 17002 / 17003', '')]},
+                 'deployment': {'title': '节点 / 订阅', 'badge': ('已部署 · 本机记录', 'good'),
+                                'rows': [('节点', 'node.example.com', ''), ('订阅', 'sub.example.com', ''), ('入口', '仅域名', 'warning')]},
+                 'notice': {'title': '尚未启用自动优选', 'tone': 'warning',
+                            'lines': ['当前仅域名入口。', '按 A 打开自动优选设置']},
+                 'focus': 'maintenance', 'shortcut': 'auto-settings'}
+        actions = [('install', '部署', ''), ('subscription', '订阅', ''), ('maintenance', '维护', ''), ('exit', '退出', '')]
+        for dimensions in ((20, 52), (24, 80), (32, 120)):
+            with self.subTest(dimensions=dimensions):
+                ui, screen = self.ui(['q'], dimensions)
+                ui.home(model, actions)
+                text = '\n'.join(row[2] for row in screen.writes)
+                self.assertIn('PrivateXUI', text)
+                self.assertGreaterEqual(text.count('╭'), 7)
+                self.assertIn('尚未启用自动优选', text)
+                self.assertTrue(any('3 维护' in row[2] and row[3] == ui.selected for row in screen.writes))
+
+    def test_auto_shortcut_opens_settings_and_never_deploys(self):
+        ui, _ = self.ui(['a'])
+        model = {'server': {'title': '服务器', 'badge': ('正常', 'good'), 'rows': []},
+                 'deployment': {'title': '订阅', 'badge': ('已配置', 'good'), 'rows': []},
+                 'notice': {'title': '待配置', 'tone': 'warning', 'lines': []}, 'shortcut': 'auto-settings'}
+        self.assertEqual(ui.home(model, [('install', '部署', ''), ('exit', '退出', '')]), 'auto-settings')
 
     def test_form_backspace_default_and_validation(self):
         ui, _ = self.ui(['\n', '\x15', 'o', 'k', 'x', tui.curses.KEY_BACKSPACE, '\n'])
@@ -136,6 +163,51 @@ class GuidedUITests(unittest.TestCase):
             lines = '\n'.join(wizard.status_lines(self.path, REPORT, True))
         self.assertIn('动态优选', lines)
         self.assertNotIn('3 条节点配置', lines)
+
+    def test_legacy_domain_only_is_yellow_with_explicit_action_and_no_mutation(self):
+        state = dict(STATE, preferred=[])
+        original = json.dumps(state)
+        self.path.write_text(original)
+        with patch.object(wizard, 'panel_status', return_value='已安装 · 运行中'):
+            model = wizard.dashboard_state(self.path, REPORT, True)
+        self.assertEqual(model['notice']['tone'], 'warning')
+        self.assertEqual(model['shortcut'], 'auto-settings')
+        self.assertIn('当前仅域名入口', model['notice']['lines'][0])
+        self.assertIn('自动优选', model['notice']['lines'][1])
+        self.assertEqual(self.path.read_text(), original)
+        serialized = json.dumps(model, ensure_ascii=False)
+        self.assertNotIn('3 条节点配置', serialized)
+        self.assertNotIn(STATE['subscription_token'], serialized)
+        self.assertNotIn(STATE['uuid'], serialized)
+
+    def test_stopped_panel_is_red_even_with_ready_local_deployment(self):
+        self.path.write_text(json.dumps(dict(STATE, preferred_mode='auto')))
+        with patch.object(wizard, 'panel_status', return_value='已安装 · 服务未运行'):
+            model = wizard.dashboard_state(self.path, REPORT, True)
+        self.assertEqual(model['server']['badge'][1], 'danger')
+        self.assertEqual(model['notice']['tone'], 'danger')
+        self.assertIn('3x-ui', model['notice']['title'])
+
+    def test_dashboard_corrupt_state_is_red_and_preserved(self):
+        self.path.write_text('bad-state')
+        with patch.object(wizard, 'panel_status', return_value='已安装 · 运行中'):
+            model = wizard.dashboard_state(self.path, REPORT, True)
+        self.assertEqual(model['deployment']['badge'][1], 'danger')
+        self.assertEqual(model['notice']['tone'], 'danger')
+        self.assertEqual(self.path.read_text(), 'bad-state')
+
+    def test_automatic_entry_shortcut_still_requires_explicit_confirmation(self):
+        self.path.write_text(json.dumps(dict(STATE, preferred=[])))
+        ui = Mock()
+        ui.choose.return_value = 'auto'
+        ui.confirm.return_value = False
+        controller = wizard.GuidedUI(str(self.path), REPORT, ui)
+        with patch.object(controller, 'command') as command:
+            controller.settings(suggest_auto=True)
+        self.assertEqual(ui.choose.call_args.kwargs['initial'], 'auto')
+        ui.ask.assert_not_called()
+        ui.confirm.assert_called_once()
+        command.assert_not_called()
 
     def test_missing_and_broken_deployment_are_distinct(self):
         with patch.object(wizard, 'panel_status', return_value='未安装'):

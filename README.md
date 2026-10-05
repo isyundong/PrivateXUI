@@ -33,7 +33,7 @@ apt-get update && apt-get install -y python3 curl ca-certificates
 
 ### 3. 使用终端界面
 
-支持方向键选择、Enter 确认、Esc 返回。主页只有四个入口：
+支持方向键选择、Enter 确认、Esc 返回。主页使用状态卡和边框分区：绿色正常、黄色待处理、红色异常；选中操作高亮。只有四个入口：
 
 ```text
 PRIVATE XUI
@@ -44,6 +44,8 @@ PRIVATE XUI
 
   部署       订阅       维护       退出
 ```
+
+[查看实际界面截图](docs/interface.md)。旧配置尚未启用自动优选时，首页显示黄色提示，可按 **A** 直达设置。
 
 首次选择 **部署**，填写 IP、两个域名、协议和订阅名称，再输入 Cloudflare Token。界面显示安装步骤和耗时；不支持全屏的终端自动使用简洁文字模式。
 
