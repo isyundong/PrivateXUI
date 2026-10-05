@@ -8,7 +8,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = ('__main__.py', 'manage.py', 'wizard.py', 'environment.py', 'cloudflare_api.py',
-         'storage.py', 'xui_backend.py', 'worker.mjs')
+         'storage.py', 'progress.py', 'preferred.py', 'connectivity.py', 'tui.py', 'xui_backend.py', 'worker.mjs')
 
 
 def build():

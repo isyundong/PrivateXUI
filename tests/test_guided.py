@@ -77,7 +77,7 @@ class WizardTests(unittest.TestCase):
         self.addCleanup(quiet.__exit__, None, None, None)
 
     def test_wizard_reprompts_invalid_ip_domain_and_protocol(self):
-        answers = ['192.168.1.1', '', 'node.example.com', 'node.example.com', 'sub.example.com', 'bad', '1,2', '', 'y']
+        answers = ['192.168.1.1', '', 'node.example.com', 'node.example.com', 'sub.example.com', 'bad', '1,2', 'y']
         with patch('builtins.input', side_effect=answers):
             args = wizard.install_questions(self.state, REPORT, installed=False)
         self.assertTrue(args.fresh)
@@ -86,12 +86,12 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(args.sub_domain, 'sub.example.com')
 
     def test_cancel_makes_no_deployment_call(self):
-        with patch('builtins.input', side_effect=['', 'node.example.com', 'sub.example.com', '', '', 'n']), patch.object(m, 'run_command') as run:
+        with patch('builtins.input', side_effect=['', 'node.example.com', 'sub.example.com', '', 'n']), patch.object(m, 'run_command') as run:
             self.assertIsNone(wizard.install_questions(self.state, REPORT, installed=True))
         run.assert_not_called()
 
     def test_menu_existing_panel_dispatches_install_then_exit(self):
-        answers = ['1', '', 'node.example.com', 'sub.example.com', '1', '', 'y', '0']
+        answers = ['1', '', 'node.example.com', 'sub.example.com', '1', 'y', '0']
         with patch.object(sys.stdin, 'isatty', return_value=True), patch.object(wizard, 'inspect_server', return_value=REPORT), patch.object(m.xui, 'is_xui_installed', return_value=True), patch('builtins.input', side_effect=answers), patch.object(m, 'run_command') as run:
             wizard.menu(self.state)
         run.assert_called_once()

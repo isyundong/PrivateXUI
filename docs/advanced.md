@@ -10,19 +10,19 @@
 客户端使用节点 → node.example.com:443 → Cloudflare → VPS 上的 3x-ui/Xray
 ```
 
-运行时不访问 `yx-auto.pages.dev`、`url.v1.mk` 或原作者的优选地址服务。两个原项目的核心职责已整合；订阅部分重新实现，没有搬入原项目的第三方转换器及地址源。
+订阅不访问 `yx-auto.pages.dev`、`url.v1.mk`，由你自己的 Worker 生成。自动优选模式恢复原作的公开 IP 数据来源和域名池；代码不把 UUID、节点路径或订阅令牌作为来源请求参数。
 
 ## 这版包含什么
 
 - VLESS、Trojan、VMess，WebSocket + 客户端 TLS，客户端入口统一为 443。
 - 一个独立随机订阅令牌；URL 中没有节点 UUID、节点域名或 WebSocket 路径。
 - 默认 Clash/Mihomo YAML、可选 Base64 订阅和原始节点链接，均在自己的 Worker 内生成。
-- 自有优选 IP/域名列表，支持 IPv4、IPv6；不自动请求公共优选源。
-- 安装、只读查看、订阅令牌轮换、Worker 更新、卸载。
-- 显式配置 Worker Secret，关闭 Worker 日志采集和 Logpush；订阅响应 `no-store`，没有应用层请求日志、数据库或外部网络请求。
+- 默认自动优选：公开动态 IP + 原作 11 个域名；也可选静态候选、仅域名入口或自有列表。支持 IPv4、IPv6。
+- TUI 首页四入口：部署、订阅、维护、退出；高级操作收纳到维护。安装/更新有阶段进度与耗时。
+- 显式配置 Worker Secret，关闭 Worker 日志采集和 Logpush；订阅响应 `no-store`，没有应用层请求日志或数据库；自动优选模式只访问固定的公开地址源。
 - 只添加/删除本项目的 Cloudflare 规则；已有 DNS 名称会拒绝覆盖。每个部署先写私有状态，失败自动尝试清理，清理失败保留状态以便重试。
 
-这是同一个代码项目，运行在 VPS 和 Cloudflare Worker 两个位置，不需要原作者的任何在线服务。Cloudflare 平台仍是受信任的服务提供方，能处理 Worker 中的节点配置；不应把它理解为“任何第三方都看不到凭据”。持有完整订阅 URL 的人仍可下载节点凭据，独立令牌不会使订阅链接变成公开资料。
+这是同一个代码项目，运行在 VPS 和 Cloudflare Worker 两个位置，不需要原作者的在线订阅或转换服务。Cloudflare 平台仍是受信任的服务提供方，能处理 Worker 中的节点配置；不应把它理解为“任何第三方都看不到凭据”。持有完整订阅 URL 的人仍可下载节点凭据，独立令牌不会使订阅链接变成公开资料。
 
 ## 环境与域名
 
@@ -39,7 +39,7 @@ PostgreSQL、Docker 面板、自定义数据库路径、Surge/Sing-box 等专用
 
 ## Cloudflare API Token
 
-使用 API Token，**不使用 Global API Key**。运行时隐藏输入，工具不会把 Cloudflare Token 写入状态文件或上传给 Worker。
+使用 API Token，**不使用 Global API Key**。运行时隐藏输入；Token 仅在当前进程内存中复用，认证失败后清空以便重新输入。退出不保存，工具不会把它写入状态文件或上传给 Worker。
 
 在 [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建 Custom Token，只复制创建完成后显示的 Token 本身，不要复制整段 curl 命令、`Bearer`、Token ID 或 Global API Key。已有令牌也可以核对并调整授权策略。
 
@@ -77,7 +77,7 @@ Account Resources 选择域名所在的账号；Zone Resources 选择节点与�
 private-xui check-cloudflare --domain node.example.com
 ```
 
-或使用菜单 **9**。它只读取域名列表和检查目标 Zone 是否可见，不创建状态文件，也不修改面板、节点或 Cloudflare 资源。读取成功仅说明这一步的认证和读取权限可用，不能保证所有后续写入权限都具备。
+或进入 TUI 的“维护 → 连接与凭据检查 → Cloudflare 凭据”。它只读取域名列表和检查目标 Zone 是否可见，不创建状态文件，也不修改面板、节点或 Cloudflare 资源。读取成功仅说明这一步的认证和读取权限可用，不能保证所有后续写入权限都具备。
 
 如果失败发生在首次 `GET /zones`，还未安装面板或创建节点，不需要卸载。只有状态标记为未完成部署时才应执行清理；已完成的部署不会因一次凭据错误而需要卸载。
 
@@ -123,10 +123,10 @@ ssh -L 2053:127.0.0.1:面板实际端口 root@VPS公网IP
 sudo private-xui show
 ```
 
-输出格式如下；令牌会由程序生成：
+默认只展示一条完整 Clash 链接。以下是高级可选格式，令牌由程序生成：
 
 ```text
-Clash 订阅:   https://sub.example.com/s/随机令牌
+Clash 订阅:   https://sub.example.com/s/随机令牌/Private-XUI.yaml
 其他客户端:   https://sub.example.com/s/随机令牌?format=base64
 原始节点:     https://sub.example.com/s/随机令牌?format=raw
 仅 VLESS:    https://sub.example.com/s/随机令牌?protocol=vless
@@ -136,17 +136,50 @@ Clash 订阅:   https://sub.example.com/s/随机令牌
 
 支持自定义请求头的客户端也可请求 `https://sub.example.com/sub`，发送 `Authorization: Bearer 随机令牌`，避免令牌出现在 URL 路径中。
 
-## 自有优选地址
+## 自动优选与自有地址
 
-将 `preferred.example.json` 复制为自己的列表，例如 `preferred.json`。填入经过你验证的 Cloudflare 接入地址；这些地址只是连接目标，TLS SNI 和 WebSocket Host 始终使用你的节点域名，证书校验保持开启。示例中的地址仅用于文档，不能直接作为可用节点。
+入口模式有四种，在 **维护 → 订阅设置** 中选择：
 
-安装时加 `--preferred preferred.json`；安装后更新：
+- `auto`：默认模式。自己的 Worker 请求固定公开接口 `https://api.uouin.com/index.php/index/Cloudflare`，合并原作的 11 个优选域名和自己的节点域名。接口样本是五组各十条，因此单协议可得到 `1 + 11 + 50 = 62` 条配置；这不是固定数量或可用性保证。三协议会分别生成对应连接配置，仍然共用一台 VPS。
+- `builtin`：六个 Cloudflare 静态候选 + 自己的域名，不访问公开地址源。
+- `direct`：每个已安装协议只生成自己的域名入口，不访问公开地址源。
+- `custom`：导入自有 JSON 地址列表，不自动联网更新。
+
+动态 IP 只接受 Cloudflare 官方 IPv4/IPv6 网段，按地址去重，所有客户端入口统一 443。每个源的请求和读取总限时 5 秒，最多 64 KiB，总入口最多 128 个。公开接口失败时，保留原域名和域名池，并用六个静态候选兜底。默认不开启原作的 GitHub 来源，与原部署器 `egi=no` 一致。
+
+代码仅构造公开列表请求，不转发订阅 URL、UUID、密码、路径、Cookie 或 Authorization。Cloudflare 平台可能自行加入 `CF-Worker` 等来源标识，源站可能据此知道请求来自哪个 Zone；这不是匿名取数服务。若不希望接触公共来源，选择 `builtin`、`direct` 或 `custom`。参考 [Cloudflare 子请求请求头](https://developers.cloudflare.com/fundamentals/reference/http-headers/#cf-worker)。
+
+多个入口时，Clash 配置包含“自动选择”组，由客户端通过代理访问 `https://www.gstatic.com/generate_204`，每 300 秒检测可达性和延迟。它不是下载带宽测试，也不把公共源的结果当作你所在网络的实测结果。证书校验保持开启，TLS SNI/WS Host 仍为自己的节点域名。
+
+旧版空列表不会自动被覆盖。升级工具后，可通过 TUI 显式切换自动优选，或运行：
 
 ```bash
-sudo private-xui update-worker --preferred preferred.json
+sudo private-xui update-worker --preferred-mode auto --subscription-name "Private XUI"
 ```
 
-所有优选地址使用 443 端口，与 Flexible 回源兼容。节点自身域名始终保留为一个选项；列表为空时只生成自己的域名节点。工具不测速、不联网刷新优选列表。
+自有文件的示例仍是 `preferred.example.json`，其中 IP 是文档示例，需替换为自己验证的 Cloudflare 接入地址：
+
+```bash
+sudo private-xui update-worker --preferred-mode custom --preferred preferred.json
+```
+
+订阅名称通过友好路径 `/s/<token>/Private-XUI.yaml`、`Content-Disposition` 和 `Profile-Title` 传递；旧 URL 继续有效。客户端可能保留旧条目的显示名，需要手动改名或重新导入。
+
+## 安装状态、进度和连通性
+
+TUI 显示 3x-ui 是否安装及 systemd 运行状态；本项目是否部署来自私有状态文件，明确标注本机记录，不假装实时核验了云端资源。未部署、部署未完成、待清理、更新待恢复分别显示。
+
+下载时，有响应总大小则显示真实字节比例，否则显示已下载字节。安装器阶段显示完成步骤、活动提示和经过时间，不伪造安装百分比。安装器原始输出不混入进度，失败日志保存在权限 600 的文件中。
+
+部署结束自动检查经 Cloudflare 的 WebSocket 回源；也可在 **维护 → 连接与凭据检查 → 节点连接** 或下面命令手动检查：
+
+```bash
+sudo private-xui check-connectivity
+```
+
+检查只请求节点域名的 443 和已配置路径，不发送节点 UUID/密码；验证 101 升级响应、WebSocket 校验值和 Cloudflare 响应标记，之后立即关闭连接。通过表示当时的回源传输链路可达，不等于已验证代理认证或所有优选 IP。
+
+通过后不再显示放行端口提醒。结果按当前域名/路径配置缓存 5 分钟；过期显示未验证。失败会区分 DNS、TLS、HTTP 响应和超时，不能据此直接判定防火墙关闭。工具不读取云厂商安全组，也不自动修改防火墙。首次 DNS/证书尚未生效时可稍后重试，检查失败不撤销已经完成的部署。
 
 ## 令牌轮换与泄露处理
 
@@ -192,13 +225,13 @@ npm ci --ignore-scripts
 npm test
 ```
 
-测试覆盖临时 SQLite 上的创建/删除、业务规则保留、部署中断与清理重试、订阅鉴权和令牌轮换、三协议格式、Unicode/IPv6、文件权限及禁止 Worker 外发请求。
+测试覆盖临时 SQLite 操作、规则保留、恢复重试、订阅鉴权、三协议、动态地址源的隐私隔离/超时/限额、TUI 导航和取消、终端恢复、进度线程结束、回源握手及失败原因。
 
 交付时没有使用真实 Cloudflare 账号或 VPS 部署。API 写入、域名证书签发、3x-ui/Xray 真实启动及客户端连接仍需在目标环境验收。语法和隔离测试通过不等于线上连通性已验证。
 
 ## 代码来源与接口依据
 
 - `xui_backend.py` 从 [byJoey/xui-cf-deployer](https://github.com/byJoey/xui-cf-deployer/tree/c7c3d9a976819a8c300d62c5408c9330b3b23b02) 提取并修改必要的面板/数据库适配，去掉旧订阅服务、全局 SSL 改写、批量规则替换、自动修复其他客户端及菜单汉化逻辑。
-- `worker.mjs` 根据 [yx-auto](https://github.com/byJoey/yx-auto/tree/17bb2f6c8fcb8848e31230ffa4c9cb8f7a32659a) 的“节点配置 → 多协议订阅”功能重新实现；无原作者的线上服务、公共地址列表或转换器依赖。
+- `worker.mjs` 根据 [yx-auto](https://github.com/byJoey/yx-auto/tree/17bb2f6c8fcb8848e31230ffa4c9cb8f7a32659a) 的“节点配置 → 多协议订阅”功能重新实现；保留原作公开动态地址源与域名池的机制，替换订阅生成和格式转换为自己的 Worker；不使用原作者的订阅服务或第三方转换器。
 - 新安装器来源固定到 [3x-ui e897b095](https://github.com/MHSanaei/3x-ui/blob/e897b0957a12c3a106f505e0551c18887b0528d6/install.sh)，本机绑定补丁在执行前应用并检查匹配。
 - [Worker 上传与 Secret](https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/)、[自定义域名 API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/methods/update/)、[按域名设置 SSL](https://developers.cloudflare.com/rules/configuration-rules/settings/)。

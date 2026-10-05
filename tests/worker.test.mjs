@@ -3,9 +3,14 @@ import assert from 'node:assert/strict';
 import {webcrypto, createHash} from 'node:crypto';
 import fs from 'node:fs';
 import YAML from 'yaml';
-import worker from '../worker.mjs';
+import worker, {SOURCE_TIMEOUT_MS, MAX_SOURCE_BYTES, MAX_ENDPOINTS} from '../worker.mjs';
 
 globalThis.crypto ??= webcrypto;
+// MD5 is a Workers Web Crypto extension used only by the public source API.
+const nativeDigest = crypto.subtle.digest.bind(crypto.subtle);
+crypto.subtle.digest = (algorithm, input) => algorithm === 'MD5'
+  ? Promise.resolve(Uint8Array.from(createHash('md5').update(input).digest()).buffer)
+  : nativeDigest(algorithm, input);
 globalThis.fetch = () => {throw new Error('Outbound network forbidden');};
 const token = 'A'.repeat(43);
 const uuid = '00000000-0000-4000-8000-000000000000';
@@ -73,7 +78,10 @@ test('Clash/Mihomo output uses correct protocol-specific credential fields', asy
     } else assert.equal(proxy.uuid, uuid);
   }
   assert.equal(body.proxies[4].cipher, 'auto');
-  assert.equal(body['proxy-groups'][0].proxies.length, 6);
+  assert.equal(body['proxy-groups'][0].proxies.length, 7);
+  assert.equal(body['proxy-groups'][0].proxies[0], '自动选择');
+  assert.equal(body['proxy-groups'][1].type, 'url-test');
+  assert.equal(body['proxy-groups'][1].proxies.length, 6);
 });
 
 test('default subscription is directly importable Clash YAML, not Base64', async () => {
@@ -95,6 +103,81 @@ test('old token rejected after rotation, new token and Bearer accepted', async (
   assert.equal((await get('/sub', {headers: {Authorization: `Bearer ${newToken}`}}, changed)).status, 200);
 });
 
+test('friendly filename route keeps all protocols and old URLs remain compatible', async () => {
+  const legacy = await get(`/s/${token}`);
+  const friendly = await get(`/s/${token}/Private-XUI.yaml`);
+  assert.equal(friendly.status, 200);
+  assert.equal(await legacy.text(), await friendly.text());
+  const filtered = await get(`/s/${token}/Private-XUI.yaml?protocol=trojan`);
+  assert(YAML.parse(await filtered.text()).proxies.every(proxy => proxy.type === 'trojan'));
+  assert.equal((await get(`/s/${'B'.repeat(43)}/Private-XUI.yaml`)).status, 404);
+  assert.equal((await get(`/s/${token}/arbitrary.yaml`)).status, 404);
+});
+
+test('subscription name uses safe Unicode headers rather than a token filename', async () => {
+  const named = {SUB_CONFIG: JSON.stringify({...config, subscription_name: '我的 VPN 订阅'})};
+  const response = await get(undefined, undefined, named);
+  const disposition = response.headers.get('Content-Disposition');
+  assert.match(disposition, /filename="Private-XUI.yaml"/);
+  assert(disposition.includes(`filename*=UTF-8''${encodeURIComponent('我的 VPN 订阅.yaml')}`));
+  assert.equal(Buffer.from(response.headers.get('Profile-Title').slice(7), 'base64').toString(), '我的 VPN 订阅');
+  assert.equal(response.headers.get('Profile-Update-Interval'), '24');
+  for (const [key, value] of response.headers) {
+    assert(!value.includes(token), `${key} leaked subscription token`);
+    assert(!value.includes(uuid), `${key} leaked node credential`);
+  }
+  const head = await get(undefined, {method: 'HEAD'}, named);
+  assert.equal(await head.text(), '');
+  assert.equal(head.headers.get('Content-Disposition'), disposition);
+  const malicious = {SUB_CONFIG: JSON.stringify({...config, subscription_name: 'Bad\r\nHeader:"/\\\tname'})};
+  assert.equal((await get(undefined, undefined, malicious)).status, 200);
+  const unauthorized = await get('/s/' + 'B'.repeat(43), undefined, named);
+  assert.equal(unauthorized.headers.get('Content-Disposition'), null);
+  assert.equal(unauthorized.headers.get('Profile-Title'), null);
+});
+
+test('no preferred addresses means one entry per configured protocol, not one overall', async () => {
+  const direct = {SUB_CONFIG: JSON.stringify({...config, preferred: []})};
+  const all = YAML.parse(await (await get(undefined, undefined, direct)).text());
+  assert.deepEqual(all.proxies.map(proxy => proxy.type), ['vless', 'trojan', 'vmess']);
+  assert(all.proxies.every(proxy => proxy.name.includes('域名入口')));
+  const vless = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, direct)).text());
+  assert.equal(vless.proxies.length, 1);
+  assert.equal(vless['proxy-groups'].length, 1);
+});
+
+test('six candidate entries produce 21 usable definitions and client-side latency selection', async () => {
+  const preferred = Array.from({length: 6}, (_, i) => ({address: `104.${16 + i}.0.1`, name: `CF 候选 ${i + 1}`}));
+  const candidates = {SUB_CONFIG: JSON.stringify({...config, preferred})};
+  const response = await get(undefined, undefined, candidates);
+  const body = YAML.parse(await response.text());
+  assert.equal(body.proxies.length, 21);
+  const automatic = body['proxy-groups'].find(group => group.type === 'url-test');
+  assert.deepEqual(automatic.proxies, body.proxies.map(proxy => proxy.name));
+  assert.equal(automatic.url, 'https://www.gstatic.com/generate_204');
+  for (const protocol of ['vless', 'trojan', 'vmess']) {
+    const entries = body.proxies.filter(proxy => proxy.type === protocol);
+    assert.equal(entries.length, 7);
+    assert.equal(entries[0].server, config.domain);
+    for (const proxy of entries) {
+      assert.equal(proxy['ws-opts'].headers.Host, config.domain);
+      assert.equal(proxy.sni || proxy.servername, config.domain);
+      assert.equal(proxy.password || proxy.uuid, config.uuid);
+      assert.equal(proxy['skip-cert-verify'], false);
+    }
+  }
+});
+
+test('duplicate entry points do not create duplicate nodes', async () => {
+  const duplicated = {SUB_CONFIG: JSON.stringify({...config, preferred: [
+    {address: config.domain.toUpperCase(), name: 'Duplicate domain'},
+    ...config.preferred, ...config.preferred,
+  ]})};
+  const body = YAML.parse(await (await get(undefined, undefined, duplicated)).text());
+  assert.equal(body.proxies.length, 6);
+  assert.equal(new Set(body.proxies.map(proxy => proxy.name)).size, 6);
+});
+
 test('override parameters and unsupported methods/formats are rejected', async () => {
   for (const suffix of ['?domain=evil.example', '?path=/other', '?uuid=fake', '?format=surge', '?protocol=bad']) {
     assert.equal((await get(`/s/${token}${suffix}`)).status, 400);
@@ -103,11 +186,167 @@ test('override parameters and unsupported methods/formats are rejected', async (
   assert.equal(await (await get(`/s/${token}`, {method: 'HEAD'})).text(), '');
 });
 
-test('malformed config returns generic error and source has no outgoing calls', async () => {
+test('malformed config returns generic error and source has no telemetry or converters', async () => {
   const response = await get(undefined, undefined, {SUB_CONFIG: 'not JSON'});
   assert.equal(response.status, 503);
   assert.equal(await response.text(), 'Subscription unavailable');
   const source = fs.readFileSync(new URL('../worker.mjs', import.meta.url), 'utf8');
-  assert(!/\bfetch\s*\(/.test(source.replace('async fetch(request, env)', 'async handler(request, env)')));
   assert(!/console\.|yx-auto|url\.v1\.mk/.test(source));
+});
+
+function autoEnv(extra = {}) {
+  return {SUB_CONFIG: JSON.stringify({...config, preferred_mode: 'auto', preferred: [], ...extra})};
+}
+
+function publicData(count = 10) {
+  return {data: Object.fromEntries(['ctcc', 'cucc', 'cmcc', 'bgp', 'ipv6'].map((key, group) => [key, {
+    info: Array.from({length: count}, (_, i) => ({
+      ip: key === 'ipv6' ? `2606:4700::${(i + 1).toString(16)}` : `104.16.${group}.${i + 1}`,
+      ping: '1ms', speed: '99MB/s',
+    })),
+  }]))};
+}
+
+test('auto mode restores domain pool plus 50 dynamic IPs without disclosing private config', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    calls.push({url, options});
+    return Response.json(publicData());
+  });
+  const response = await get(`/s/${token}/Private-XUI.yaml?protocol=vless`, {
+    headers: {Authorization: `Bearer ${token}`, Cookie: `secret=${token}`, Referer: `https://${config.domain}/${uuid}`},
+  }, autoEnv());
+  assert.equal(response.status, 200);
+  const body = YAML.parse(await response.text());
+  assert.equal(body.proxies.length, 62); // 1 domain + 11 pooled domains + 50 distinct IPs
+  assert(body.proxies.every(proxy => proxy.type === 'vless'));
+  assert.equal(body.proxies[0].server, config.domain);
+  assert(body.proxies.some(proxy => proxy.name.includes('电信')));
+  assert(!body.proxies.some(proxy => /1ms|99MB/.test(proxy.name))); // source measurements aren't user's
+  assert.equal(calls.length, 1);
+  const call = calls[0];
+  const target = new URL(call.url);
+  assert.equal(target.origin + target.pathname, 'https://api.uouin.com/index.php/index/Cloudflare');
+  assert.deepEqual([...target.searchParams.keys()].sort(), ['key', 'time']);
+  const time = target.searchParams.get('time');
+  const inner = createHash('md5').update('DdlTxtN0sUOu').digest('hex');
+  assert.equal(target.searchParams.get('key'), createHash('md5').update(inner + '70cloudflareapikey' + time).digest('hex'));
+  assert.equal(call.options.method, 'GET');
+  assert.equal(call.options.redirect, 'error');
+  assert.equal(call.options.credentials, 'omit');
+  assert.equal(call.options.body, undefined);
+  const sent = JSON.stringify(call);
+  for (const secret of [uuid, token, config.domain, config.subscription_domain, ...config.routes.map(route => route.path)]) {
+    assert(!sent.includes(secret), `private value sent to public list provider`);
+  }
+});
+
+test('auto mode supports every configured protocol and keeps TLS verification enabled', async t => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json(publicData()));
+  const body = YAML.parse(await (await get(undefined, undefined, autoEnv())).text());
+  assert.equal(body.proxies.length, 186);
+  for (const protocol of ['vless', 'trojan', 'vmess']) {
+    const entries = body.proxies.filter(proxy => proxy.type === protocol);
+    assert.equal(entries.length, 62);
+    assert(entries.every(proxy => (proxy.sni || proxy.servername) === config.domain));
+    assert(entries.every(proxy => proxy['skip-cert-verify'] === false));
+  }
+});
+
+test('bad public addresses are rejected and repeated IPv4/IPv6 entries are deduplicated', async t => {
+  const bad = ['127.0.0.1', '10.0.0.1', '169.254.169.254', '192.0.2.1', '8.8.8.8', '::1',
+    'fd00::1', 'fe80::1', '2606:4700::1/128', 'https://evil.example', 'node.example.com', '104.16.0.999'];
+  const addresses = [...bad, '104.18.1.1', '104.18.1.1', '2606:4700::1', '2606:4700:0:0:0:0:0:1'];
+  t.mock.method(globalThis, 'fetch', async () => Response.json({data: {ctcc: {info: addresses.map(ip => ({ip}))}}}));
+  const body = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, autoEnv())).text());
+  assert.equal(body.proxies.length, 14);
+  assert.equal(body.proxies.filter(proxy => proxy.server === '104.18.1.1').length, 1);
+  assert.equal(body.proxies.filter(proxy => proxy.server === '2606:4700::1').length, 1);
+  assert(body.proxies.slice(1).every(proxy => !bad.includes(proxy.server)));
+});
+
+test('optional GitHub source is fixed, excludes non-CF hosts and keeps only port 443', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    calls.push({url, options});
+    if (url.startsWith('https://api.uouin.com/')) return Response.json(publicData(1));
+    return new Response('104.18.9.1:8443#unsupported\n104.18.9.3:443#supported\n[2606:4700::88]:443#IPv6\n104.18.9.2:80#not TLS\n8.8.8.8:443\nhttps://evil.example\nsaas.example#arbitrary host');
+  });
+  const body = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, autoEnv({preferred_github: true}))).text());
+  assert.equal(calls.length, 2);
+  assert(calls.some(call => call.url === 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt'));
+  assert.equal(body.proxies.find(proxy => proxy.server === '104.18.9.3').port, 443);
+  assert(body.proxies.some(proxy => proxy.server === '2606:4700::88'));
+  assert(!body.proxies.some(proxy => ['104.18.9.1', '104.18.9.2', '8.8.8.8', 'saas.example'].includes(proxy.server)));
+  for (const call of calls) {
+    const encoded = JSON.stringify(call);
+    for (const secret of [uuid, token, config.domain, config.subscription_domain, ...config.routes.map(route => route.path)]) {
+      assert(!encoded.includes(secret));
+    }
+  }
+});
+
+test('manually configured entry ports normalize to 443 and deduplicate consistently', async () => {
+  const preferred = [
+    {address: '104.18.9.1', port: 8443, name: 'manual port'},
+    {address: '104.18.9.1', port: 443, name: 'same entry'},
+    {address: config.domain, port: 2053, name: 'same domain'},
+  ];
+  const environment = {SUB_CONFIG: JSON.stringify({...config, preferred})};
+  const body = YAML.parse(await (await get(undefined, undefined, environment)).text());
+  assert.equal(body.proxies.length, 6);
+  assert(body.proxies.every(proxy => proxy.port === 443));
+  for (const type of ['vless', 'trojan', 'vmess']) {
+    assert.equal(body.proxies.filter(proxy => proxy.type === type && proxy.server === '104.18.9.1').length, 1);
+  }
+});
+
+test('source failures preserve DNS and domain pool with six explicitly named fallback candidates', async t => {
+  for (const result of [new Response('unavailable', {status: 503}), new Response('malformed'), Response.json({data: {}})]) {
+    t.mock.method(globalThis, 'fetch', async () => result.clone());
+    const response = await get(`/s/${token}?protocol=vless`, undefined, autoEnv());
+    assert.equal(response.status, 200);
+    const body = YAML.parse(await response.text());
+    assert.equal(body.proxies.length, 18);
+    assert.equal(body.proxies.filter(proxy => proxy.name.includes('CF 候选')).length, 6);
+    assert.equal(body.proxies[0].server, config.domain);
+  }
+});
+
+test('source deadline includes a stalled response body and aborts both optional requests', async t => {
+  const signals = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    signals.push(options.signal);
+    return new Response(new ReadableStream({start() {}}));
+  });
+  const start = Date.now();
+  const response = await get(`/s/${token}?protocol=vless`, undefined, autoEnv({preferred_github: true}));
+  const elapsed = Date.now() - start;
+  assert(elapsed < SOURCE_TIMEOUT_MS + 2000, `source timeout took ${elapsed} ms`);
+  assert.equal(response.status, 200);
+  assert.equal(YAML.parse(await response.text()).proxies.length, 18);
+  assert.equal(signals.length, 2);
+  assert(signals.every(signal => signal.aborted));
+});
+
+test('source response byte limit and endpoint limit bound generated subscriptions', async t => {
+  t.mock.method(globalThis, 'fetch', async () => new Response(' '.repeat(MAX_SOURCE_BYTES + 1)));
+  let body = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, autoEnv())).text());
+  assert.equal(body.proxies.length, 18);
+  t.mock.method(globalThis, 'fetch', async () => Response.json(publicData(200)));
+  body = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, autoEnv())).text());
+  assert.equal(body.proxies.length, MAX_ENDPOINTS);
+});
+
+test('unauthorized, unknown query URLs, and offline modes cannot trigger public source fetches', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async url => {calls.push(url); return Response.json(publicData());});
+  for (const query of ['source=https://127.0.0.1', 'piu=https://evil.example', 'preferred_url=https://evil.example']) {
+    assert.equal((await get(`/s/${token}?${query}`, undefined, autoEnv())).status, 400);
+  }
+  assert.equal((await get('/s/' + 'B'.repeat(43), undefined, autoEnv())).status, 404);
+  for (const mode of [undefined, 'direct', 'custom', 'builtin']) {
+    assert.equal((await get(undefined, undefined, autoEnv({preferred_mode: mode}))).status, 200);
+  }
+  assert.equal(calls.length, 0);
 });

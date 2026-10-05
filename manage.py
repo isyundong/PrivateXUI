@@ -18,12 +18,16 @@ import sys
 import uuid
 from getpass import getpass
 
-from cloudflare_api import Cloudflare
+from cloudflare_api import APIError, Cloudflare
 from environment import inspect_server, print_report, require_supported, validate_ipv4
+from preferred import DEFAULT_MODE, MODE_LABELS, builtin_candidates
+from progress import Progress
+import connectivity
 import xui_backend as xui
 
 DEFAULT_STATE = '/etc/x-ui/private-cf/state.json'
 WORKER_SOURCE = Path(__file__).with_name('worker.mjs')
+_CF_TOKEN = None  # Process memory only; never written to state or Worker bindings.
 
 
 from storage import atomic_private_write
@@ -96,20 +100,41 @@ def best_zone(zones, domain):
 
 
 def cf_client():
+    global _CF_TOKEN
     token = os.environ.get('CF_API_TOKEN', '').strip()
     if token:
-        print('使用环境变量 CF_API_TOKEN；如需重新输入，请先执行 unset CF_API_TOKEN。')
+        if token != _CF_TOKEN:
+            print('使用环境变量 CF_API_TOKEN；如需重新输入，请先执行 unset CF_API_TOKEN。')
+    elif _CF_TOKEN:
+        token = _CF_TOKEN
     else:
         token = getpass('Cloudflare API Token（只粘贴令牌本身，隐藏输入）: ').strip()
-    return Cloudflare(token)
+    client = Cloudflare(token)
+    _CF_TOKEN = token
+    return client
+
+
+def clear_token_cache():
+    global _CF_TOKEN
+    _CF_TOKEN = None
+
+
+@contextlib.contextmanager
+def cf_session():
+    try:
+        yield cf_client()
+    except APIError as exc:
+        if exc.status in (401, 403) or 9109 in exc.codes or 10000 in exc.codes:
+            clear_token_cache()
+        raise
 
 
 def check_cloudflare(domain=None):
     if domain:
         domain = hostname(domain)
-    cf = cf_client()
-    print('正在只读检查 Cloudflare 域名列表访问权限……')
-    zones = cf.listing('/zones')
+    with cf_session() as cf:
+        print('正在只读检查 Cloudflare 域名列表访问权限……')
+        zones = cf.listing('/zones')
     print(f'域名列表读取成功，可访问 {len(zones)} 个 Zone。')
     if domain:
         zone = best_zone(zones, domain)
@@ -127,6 +152,8 @@ def worker_config(state, token=None):
     return {
         'subscription_domain': state['subscription_domain'], 'domain': state['domain'],
         'uuid': state['uuid'], 'routes': state['routes'], 'preferred': state['preferred'],
+        'preferred_mode': state.get('preferred_mode', 'custom' if state.get('preferred') else 'direct'),
+        'subscription_name': state.get('subscription_name', 'Private XUI'),
         'token_sha256': hashlib.sha256((token or state['subscription_token']).encode()).hexdigest(),
     }
 
@@ -145,20 +172,59 @@ def upload(cf, state, token=None):
             {'enabled': False, 'previews_enabled': False})
 
 
+def subscription_url(state):
+    return f'https://{state["subscription_domain"]}/s/{state["subscription_token"]}/Private-XUI.yaml'
+
+
 def print_links(state):
-    base = f'https://{state["subscription_domain"]}/s/{state["subscription_token"]}'
+    base = subscription_url(state)
     print(f'状态: {state["status"]}')
     if state['status'] != 'ready':
         print('部署未完成或更新待恢复，请先按 README 处理；以下配置可能尚未生效。')
+    print(f'订阅名称: {state.get("subscription_name", "Private XUI")}')
     print(f'Clash/Mihomo 订阅: {base}')
-    print('将上面地址添加到客户端的“订阅 / 配置”，更新后即可选择节点。')
-    print(f'其他客户端（Base64，可选）: {base}?format=base64')
-    for route in state['routes']:
-        print(f'仅 {route["protocol"].upper()} 的 Clash 订阅: {base}?protocol={route["protocol"]}')
-    ports = '、'.join(f'{route["protocol"].upper()}={route["port"]}' for route in state['routes'])
-    print(f'VPS 需要放行的节点回源 TCP 端口: {ports}')
-    print('另保留实际 SSH 端口（默认 22）；通过 SSH 隧道访问面板时，无需额外开放面板端口。')
-    print('请核对系统防火墙和云安全组；本工具不会自动修改防火墙。')
+    if state.get('preferred_mode') == 'auto':
+        print('自动优选：公开域名池与动态 IP 池，数量以客户端更新后的订阅为准。')
+    else:
+        count = len({state['domain']} | {item['address'] for item in state.get('preferred', [])})
+        print(f'本地配置：{len(state["routes"])} 个协议 × {count} 个入口 = {len(state["routes"]) * count} 条连接配置。')
+    connectivity.print_report(state)
+
+
+def select_preferred(mode=None, filename=None):
+    mode = mode or ('custom' if filename else DEFAULT_MODE)
+    if mode == 'auto':
+        return mode, []  # Only fixed public-list requests leave the Worker, without node credentials.
+    if mode == 'builtin':
+        return mode, builtin_candidates()
+    if mode == 'direct':
+        return mode, []
+    if mode == 'custom' and filename:
+        return mode, preferred_from_file(filename)
+    raise ValueError('自有地址模式需要提供地址文件；也可选择内置候选或仅域名入口。')
+
+
+def validate_subscription_name(value):
+    value = value.strip()
+    if not value or len(value) > 80 or any(ord(c) < 32 for c in value):
+        raise ValueError('订阅名称需为 1–80 个字符，不可包含控制字符')
+    return value
+
+
+def check_connectivity(state, path=None):
+    if state.get('status') not in ('ready', 'update-pending'):
+        raise ValueError('部署尚未完成，请先处理恢复状态')
+    progress = Progress('回源检查', 1)
+    with progress.step('验证 Cloudflare → VPS 的 WebSocket 握手'):
+        report = connectivity.probe_all(state)
+    state['connectivity'] = report
+    if path:
+        try:
+            save(path, state)
+        except OSError:
+            print('检查已完成，但结果未能写入状态文件。')
+    connectivity.print_report(state, report)
+    return report
 
 
 def preflight(cf, args):
@@ -187,9 +253,11 @@ def install(cf, args):
     if Path(args.state).exists():
         raise ValueError('已有状态文件。请先 show 查看，或 uninstall 清理，不会覆盖原部署。')
     # Validate/cloud preflight before fresh installation or node modifications.
-    domain, sub_domain, zone, sub_zone = preflight(cf, args)
+    with Progress('部署检查', 1).step('检查 Cloudflare 权限和域名'):
+        domain, sub_domain, zone, sub_zone = preflight(cf, args)
     protocols = xui.parse_protocol_selection(args.protocols)
-    preferred = preferred_from_file(args.preferred)
+    preferred_mode, preferred = select_preferred(getattr(args, 'preferred_mode', None), args.preferred)
+    sub_name = validate_subscription_name(getattr(args, 'subscription_name', None) or 'Private XUI')
     if args.fresh:
         if xui.is_xui_installed():
             raise ValueError('已有 3x-ui，请去掉 --fresh')
@@ -214,7 +282,8 @@ def install(cf, args):
         'zone_id': zone['id'], 'sub_zone_id': sub_zone['id'], 'sub_zone_name': sub_zone['name'],
         'account_id': zone['account']['id'], 'worker_name': 'private-xui-' + deployment_id,
         'uuid': credential, 'short_id': short_id, 'subscription_token': secrets.token_urlsafe(32),
-        'preferred': preferred, 'ipv4': ip, 'inbound_ids': [], 'worker_attempted': False,
+        'preferred': preferred, 'preferred_mode': preferred_mode, 'subscription_name': sub_name,
+        'ipv4': ip, 'inbound_ids': [], 'worker_attempted': False,
         'routes': [{'protocol': proto, 'port': port, 'path': f'/{uuid.uuid4().hex}-{xui.PROTOCOL_SUFFIX[proto]}'}
                    for proto, port in zip(protocols, allocated)],
         'tags': [f'{short_id}-{proto}' for proto in protocols],
@@ -223,43 +292,49 @@ def install(cf, args):
     if cf.call('GET', f'/accounts/{account}/workers/scripts/{name}/settings', missing_ok=True) is not None:
         raise ValueError('Worker 名称已存在，停止以防覆盖')
     save(args.state, state)  # journal exists BEFORE the first node/cloud mutation
+    progress = Progress('节点与订阅部署', len(state['routes']) + 5)
     try:
         for route in state['routes']:
-            ids = xui.create_inbounds(backend, credential, short_id, [route], panel=panel)
-            state['inbound_ids'].extend(ids)
-            save(args.state, state)
-        # Recheck just before creating resources: no reuse/overwrite of DNS records.
-        if cf.dns(zone['id'], domain):
-            raise ValueError('节点 DNS 在部署期间被创建，停止并回滚本次资源')
-        cf.call('POST', f'/zones/{zone["id"]}/dns_records', {
-            'type': 'A', 'name': domain, 'content': ip, 'proxied': True, 'ttl': 1,
-            'comment': 'private-xui:' + deployment_id,
-        })
-        for route in state['routes']:
-            cf.add_rule(zone['id'], 'http_request_origin', {
-                'ref': f'private_xui_{deployment_id}_{route["protocol"]}',
-                'description': f'Private XUI {deployment_id} {route["protocol"]}', 'enabled': True,
-                'expression': f'(http.host eq "{domain}" and http.request.uri.path eq "{route["path"]}")',
-                'action': 'route', 'action_parameters': {'origin': {'port': route['port']}},
+            with progress.step(f'创建 {route["protocol"].upper()} 节点'):
+                ids = xui.create_inbounds(backend, credential, short_id, [route], panel=panel)
+                state['inbound_ids'].extend(ids)
+                save(args.state, state)
+        with progress.step('配置节点 DNS'):
+            if cf.dns(zone['id'], domain):
+                raise ValueError('节点 DNS 在部署期间被创建，停止并回滚本次资源')
+            cf.call('POST', f'/zones/{zone["id"]}/dns_records', {
+                'type': 'A', 'name': domain, 'content': ip, 'proxied': True, 'ttl': 1,
+                'comment': 'private-xui:' + deployment_id,
             })
-        cf.add_rule(zone['id'], 'http_config_settings', {
-            'ref': f'private_xui_{deployment_id}_ssl', 'description': f'Private XUI {deployment_id} SSL',
-            'enabled': True, 'expression': f'(http.host eq "{domain}")',
-            'action': 'set_config', 'action_parameters': {'ssl': 'flexible'},
-        })
-        state['worker_attempted'] = True
-        save(args.state, state)
-        upload(cf, state)
-        if cf.dns(sub_zone['id'], sub_domain):
-            raise ValueError('订阅域名在部署期间出现 DNS 记录，停止以防覆盖')
-        if any(item['hostname'] == sub_domain for item in cf.listing(f'/accounts/{account}/workers/domains')):
-            raise ValueError('订阅域名在部署期间被其他 Worker 绑定，停止以防覆盖')
-        cf.call('PUT', f'/accounts/{account}/workers/domains', {
-            'hostname': sub_domain, 'service': name, 'environment': 'production',
-            'zone_id': sub_zone['id'], 'zone_name': sub_zone['name'],
-        })
-        state['status'] = 'ready'
-        save(args.state, state)
+        with progress.step('配置节点回源规则'):
+            for route in state['routes']:
+                cf.add_rule(zone['id'], 'http_request_origin', {
+                    'ref': f'private_xui_{deployment_id}_{route["protocol"]}',
+                    'description': f'Private XUI {deployment_id} {route["protocol"]}', 'enabled': True,
+                    'expression': f'(http.host eq "{domain}" and http.request.uri.path eq "{route["path"]}")',
+                    'action': 'route', 'action_parameters': {'origin': {'port': route['port']}},
+                })
+            cf.add_rule(zone['id'], 'http_config_settings', {
+                'ref': f'private_xui_{deployment_id}_ssl', 'description': f'Private XUI {deployment_id} SSL',
+                'enabled': True, 'expression': f'(http.host eq "{domain}")',
+                'action': 'set_config', 'action_parameters': {'ssl': 'flexible'},
+            })
+        with progress.step('部署私有订阅 Worker'):
+            state['worker_attempted'] = True
+            save(args.state, state)
+            upload(cf, state)
+        with progress.step('绑定订阅域名'):
+            if cf.dns(sub_zone['id'], sub_domain):
+                raise ValueError('订阅域名在部署期间出现 DNS 记录，停止以防覆盖')
+            if any(item['hostname'] == sub_domain for item in cf.listing(f'/accounts/{account}/workers/domains')):
+                raise ValueError('订阅域名在部署期间被其他 Worker 绑定，停止以防覆盖')
+            cf.call('PUT', f'/accounts/{account}/workers/domains', {
+                'hostname': sub_domain, 'service': name, 'environment': 'production',
+                'zone_id': sub_zone['id'], 'zone_name': sub_zone['name'],
+            })
+        with progress.step('保存部署结果'):
+            state['status'] = 'ready'
+            save(args.state, state)
     except (Exception, SystemExit, KeyboardInterrupt):
         state['status'] = 'incomplete'
         save(args.state, state)
@@ -268,8 +343,13 @@ def install(cf, args):
         if failures:
             print('部分资源清理失败；保留状态文件，请排除错误后执行 uninstall。')
         raise
-    print('配置已提交。自定义域名证书/DNS 生效可能需要等待；尚未做真实节点连通性测试。')
-    print_links(state)
+    print('部署配置已提交，正在检查回源。首次 DNS/证书生效可能需要等待。')
+    # A transport probe failure must not roll back a successfully created deployment.
+    check_connectivity(state, args.state)
+    if getattr(args, 'quiet_links', False):
+        print('部署已完成，可返回“订阅”查看名称和导入地址。')
+    else:
+        print_links(state)
 
 
 def owned_inbound_ids(state, panel=None):
@@ -344,7 +424,8 @@ def cleanup(cf, state, path, panel=None):
     return failures
 
 
-def update_worker(cf, state, path, *, rotate=False, preferred=None):
+def update_worker(cf, state, path, *, rotate=False, preferred=None, preferred_mode=None,
+                  subscription_name=None, quiet_links=False):
     if state['status'] not in ('ready', 'update-pending'):
         raise ValueError('部署未完成，不能更新 Worker；请先清理失败部署')
     if state['status'] == 'update-pending':
@@ -355,14 +436,24 @@ def update_worker(cf, state, path, *, rotate=False, preferred=None):
         state['pending_token'] = token
         if preferred is not None:
             state['preferred'] = preferred
+        if preferred_mode is not None:
+            state['preferred_mode'] = preferred_mode
+        if subscription_name is not None:
+            state['subscription_name'] = validate_subscription_name(subscription_name)
         state['status'] = 'update-pending'
         save(path, state)
-    upload(cf, state, token)
-    state['subscription_token'] = token
-    state.pop('pending_token', None)
-    state['status'] = 'ready'
-    save(path, state)
-    print_links(state)
+    progress = Progress('更新订阅', 2)
+    with progress.step('发布 Worker 配置'):
+        upload(cf, state, token)
+    with progress.step('保存更新结果'):
+        state['subscription_token'] = token
+        state.pop('pending_token', None)
+        state['status'] = 'ready'
+        save(path, state)
+    if quiet_links:
+        print('订阅服务已更新，可在“订阅”页查看导入地址。')
+    else:
+        print_links(state)
 
 
 def parser():
@@ -376,18 +467,23 @@ def parser():
     create.add_argument('--protocols', default='vless,trojan,vmess',
                         help='协议列表；固定回源 TCP 端口：vless=17001，trojan=17002，vmess=17003')
     create.add_argument('--preferred', help='自有优选地址 JSON 文件（可选）')
+    create.add_argument('--preferred-mode', choices=list(MODE_LABELS), help='默认动态优选；builtin 静态候选，direct 仅域名，custom 导入文件')
+    create.add_argument('--subscription-name', help='Clash 中显示的订阅名称，默认 Private XUI')
     create.add_argument('--fresh', action='store_true', help='裸机先安装固定版本来源的 3x-ui 安装器')
     commands.add_parser('show', help='只读显示订阅链接')
     commands.add_parser('uninstall', help='只清理本项目创建的资源；保留 3x-ui 面板')
     commands.add_parser('rotate-token', help='更换订阅令牌，使旧订阅 URL 失效')
     update = commands.add_parser('update-worker', help='更新 Worker 代码/优选列表，或重试中断的更新')
     update.add_argument('--preferred', help='省略则保留当前列表；空数组文件可清空')
+    update.add_argument('--preferred-mode', choices=list(MODE_LABELS), help='省略则保留现有入口配置')
+    update.add_argument('--subscription-name', help='更新订阅显示名称')
     check = commands.add_parser('check', help='检查服务器 IP 和系统环境，不部署')
     check.add_argument('--local-only', action='store_true', help='只检查本机环境，不查询公网 IP')
     check.add_argument('--quiet', action='store_true', help='检查通过时不输出')
     commands.add_parser('panel', help='查看本工具保存的面板访问信息')
     cloud = commands.add_parser('check-cloudflare', help='只读检查 Cloudflare 凭据和域名访问权限')
     cloud.add_argument('--domain', help='可选：检查节点域名所在 Zone 是否在授权范围内')
+    commands.add_parser('check-connectivity', help='检查经过 Cloudflare 的节点回源握手，不修改防火墙')
     return result
 
 
@@ -398,18 +494,28 @@ def run_command(args):
     if not hasattr(os, 'geteuid') or os.geteuid() != 0:
         raise ValueError('请在目标 VPS 上使用 sudo 运行修改命令')
     with lock(args.state):
-        cf = cf_client()
-        if args.command == 'install':
-            install(cf, args)
+        if args.command == 'check-connectivity':
+            return check_connectivity(load(args.state), args.state)
+        with cf_session() as cf:
+            return run_cloud_command(cf, args)
+
+
+def run_cloud_command(cf, args):
+    if args.command == 'install':
+        install(cf, args)
+    else:
+        state = load(args.state)
+        if args.command == 'uninstall':
+            if cleanup(cf, state, args.state):
+                raise ValueError('清理未完成，状态文件保留供重试')
+            print('已清理本项目资源；3x-ui 面板和其他节点保留。')
         else:
-            state = load(args.state)
-            if args.command == 'uninstall':
-                if cleanup(cf, state, args.state):
-                    raise ValueError('清理未完成，状态文件保留供重试')
-                print('已清理本项目资源；3x-ui 面板和其他节点保留。')
-            else:
-                preferred = preferred_from_file(args.preferred) if getattr(args, 'preferred', None) else None
-                update_worker(cf, state, args.state, rotate=args.command == 'rotate-token', preferred=preferred)
+            mode, preferred = None, None
+            if getattr(args, 'preferred_mode', None) or getattr(args, 'preferred', None):
+                mode, preferred = select_preferred(getattr(args, 'preferred_mode', None), getattr(args, 'preferred', None))
+            update_worker(cf, state, args.state, rotate=args.command == 'rotate-token', preferred=preferred,
+                          preferred_mode=mode, subscription_name=getattr(args, 'subscription_name', None),
+                          quiet_links=getattr(args, 'quiet_links', False))
 
 
 def main(argv=None):

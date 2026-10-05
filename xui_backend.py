@@ -43,6 +43,7 @@ import hashlib
 import socket
 import tempfile
 from storage import atomic_private_write
+from progress import Progress
 
 
 from getpass import getpass
@@ -373,54 +374,67 @@ def is_password_hash(value: str) -> bool:
 
 
 def run_xui_install_script() -> Tuple[str, str]:
-    print("正在安装 3x-ui v3.9.0（SQLite / 随机端口 / 面板仅监听本机）...")
-    with request.urlopen(XUI_INSTALL_URL, timeout=30) as response:
-        script = response.read()
-    if hashlib.sha256(script).hexdigest() != XUI_INSTALL_SHA256:
-        exit_error("安装器校验失败，停止执行")
-    # The pinned upstream noninteractive default exposes HTTP on all interfaces.
-    # Change its one fixed bind default before executing; refuse unexpected source.
-    old = b'bind_local="n"'
-    if script.count(old) != 1:
-        exit_error("安装器的本机绑定补丁不匹配，停止执行")
-    script = script.replace(old, b'bind_local="y"')
-    installer_env = dict(os.environ)
-    installer_env.update(XUI_NONINTERACTIVE="1", XUI_DB_TYPE="sqlite", XUI_SSL_MODE="none")
-    try:
-        with tempfile.NamedTemporaryFile(prefix="private-xui-install-", suffix=".sh") as installer:
-            installer.write(script)
-            installer.flush()
-            proc = subprocess.run(
-                ["bash", installer.name, "v3.9.0"], input="", capture_output=True,
-                text=True, timeout=900, check=False, env=installer_env,
-            )
-    except subprocess.TimeoutExpired:
-        exit_error("3x-ui 安装超时")
-
-    install_output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
-    if proc.returncode != 0:
-        atomic_private_write(PANEL_INFO_PATH + ".install.log", install_output)
-        exit_error(f"3x-ui 安装失败 (exit {proc.returncode})；详情保存为私有安装日志")
-
-    for _ in range(45):
+    print("正在安装 3x-ui v3.9.0（SQLite / 面板随机端口 / 面板仅监听本机）...")
+    progress = Progress("3x-ui 安装", 4)
+    with progress.step("下载安装器"):
+        with request.urlopen(XUI_INSTALL_URL, timeout=30) as response:
+            try:
+                total = int(getattr(response, 'headers', {}).get('Content-Length', '0')) or None
+            except (ValueError, TypeError):
+                total = None
+            chunks, received = [], 0
+            while True:
+                chunk = response.read(16 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                received += len(chunk)
+                progress.download(received, total)
+            script = b''.join(chunks)
+    with progress.step("校验安装器并设置面板本机监听"):
+        if hashlib.sha256(script).hexdigest() != XUI_INSTALL_SHA256:
+            raise SystemExit("安装器校验失败，停止执行")
+        # Patch only the one checked default in the pinned installer.
+        old = b'bind_local="n"'
+        if script.count(old) != 1:
+            raise SystemExit("安装器的本机绑定补丁不匹配，停止执行")
+        script = script.replace(old, b'bind_local="y"')
+        installer_env = dict(os.environ)
+        installer_env.update(XUI_NONINTERACTIVE="1", XUI_DB_TYPE="sqlite", XUI_SSL_MODE="none")
+    with progress.step("执行安装器（安装依赖和面板，请等待）"):
         try:
-            result = subprocess.run(
-                ["systemctl", "is-active", "x-ui"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except OSError:
-            break
-        if result.stdout.strip() == "active":
-            print("3x-ui 安装完成，服务已启动")
-            username, password = parse_credentials_from_install_output(install_output)
-            if not username or not password:
-                exit_error("3x-ui 安装成功但未解析到登录凭据，请检查安装输出")
-            return username, password
-        time.sleep(2)
-    exit_error("3x-ui 安装完成但服务未启动，请检查 journalctl -u x-ui")
+            with tempfile.NamedTemporaryFile(prefix="private-xui-install-", suffix=".sh") as installer:
+                installer.write(script)
+                installer.flush()
+                proc = subprocess.run(
+                    ["bash", installer.name, "v3.9.0"], input="", capture_output=True,
+                    text=True, timeout=900, check=False, env=installer_env,
+                )
+        except subprocess.TimeoutExpired:
+            raise SystemExit("3x-ui 安装超时") from None
+        install_output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        if proc.returncode != 0:
+            atomic_private_write(PANEL_INFO_PATH + ".install.log", install_output)
+            raise SystemExit(f"3x-ui 安装失败 (exit {proc.returncode})；详情保存为私有安装日志")
+    with progress.step("等待服务启动并读取登录信息"):
+        for _ in range(45):
+            try:
+                result = subprocess.run(
+                    ["systemctl", "is-active", "x-ui"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                raise SystemExit("无法检查 3x-ui 服务，请检查 systemctl status x-ui") from None
+            if result.stdout.strip() == "active":
+                username, password = parse_credentials_from_install_output(install_output)
+                if not username or not password:
+                    raise SystemExit("3x-ui 安装成功但未解析到登录凭据，请检查安装输出")
+                break
+            time.sleep(2)
+        else:
+            raise SystemExit("3x-ui 安装完成但服务未启动，请检查 journalctl -u x-ui")
+    print("3x-ui 安装完成，服务已启动")
+    return username, password
 
 
 def shlex_quote(value: str) -> str:
@@ -528,16 +542,16 @@ def ensure_xui_for_fresh_setup() -> None:
     if is_xui_installed():
         exit_error("检测到已安装 3x-ui，请使用模式 1 安装节点")
     username, password = run_xui_install_script()
-    info = collect_panel_access_info(
-        installed_by_script=True,
-        plain_username=username,
-        plain_password=password,
-    )
-    save_panel_access_info(info)
-    print(f"面板信息已保存到 {PANEL_INFO_SNAPSHOT}")
-    print(f"本机地址: {info['access_url_local']}")
-    print(f"用户名: {info['username']}")
-    print(f"密码: {info['password']}")
+    progress = Progress("面板访问配置", 2)
+    with progress.step("读取面板地址和访问凭据"):
+        info = collect_panel_access_info(
+            installed_by_script=True,
+            plain_username=username,
+            plain_password=password,
+        )
+    with progress.step("保存本机访问配置"):
+        save_panel_access_info(info)
+    print('面板访问配置已安全保存，可在“维护 → 面板信息”查看。')
 
 
 def panel_tls_insecure(panel_url: str, panel_https: bool) -> bool:

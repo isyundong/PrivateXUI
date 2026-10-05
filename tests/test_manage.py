@@ -95,6 +95,7 @@ class DeploymentTests(unittest.TestCase):
             protocols='vless,trojan,vmess', ipv4='192.0.2.10', preferred=None, fresh=False)
         for obj, name, value in [(m.xui, 'DB_PATH', str(self.db)), (m.xui, 'restart_xui_service', Mock()),
                                   (m.xui, 'check_ports_available', Mock()),
+                                  (m, 'check_connectivity', Mock()),
                                   (m.xui, 'is_xui_installed', lambda: True), (m, 'panel_for', lambda backend=None: ('db', None))]:
             p = patch.object(obj, name, value)
             p.start()
@@ -147,6 +148,27 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual([(r['protocol'], r['port']) for r in state['routes']], [('vmess', 17003)])
         self.assertEqual(len(self.rows()), 2)
 
+    def test_default_install_uses_dynamic_mode_and_friendly_subscription_url(self):
+        m.install(self.cf, self.args)
+        state = m.load(self.path)
+        self.assertEqual(state['preferred_mode'], 'auto')
+        self.assertEqual(self.cf.worker['preferred_mode'], 'auto')
+        self.assertEqual(self.cf.worker['subscription_name'], 'Private XUI')
+        self.assertTrue(m.subscription_url(state).endswith('/Private-XUI.yaml'))
+        self.assertNotIn('?protocol=', m.subscription_url(state))
+
+    def test_update_does_not_silently_replace_legacy_custom_addresses(self):
+        m.install(self.cf, self.args)
+        state = m.load(self.path)
+        state.pop('preferred_mode')
+        state['preferred'] = [{'address': '192.0.2.1', 'name': 'custom'}]
+        m.update_worker(self.cf, state, self.path, quiet_links=True)
+        self.assertEqual(self.cf.worker['preferred_mode'], 'custom')
+        self.assertEqual(state['preferred'][0]['name'], 'custom')
+        m.update_worker(self.cf, state, self.path, preferred_mode='auto', preferred=[], subscription_name='我的节点', quiet_links=True)
+        self.assertEqual(self.cf.worker['preferred_mode'], 'auto')
+        self.assertEqual(self.cf.worker['subscription_name'], '我的节点')
+
     def test_existing_inbound_port_conflict_stops_before_resource_writes(self):
         with contextlib.closing(sqlite3.connect(self.db)) as c, c:
             c.execute('UPDATE inbounds SET port=17002 WHERE id=1')
@@ -185,6 +207,14 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.rows(), [(1, 'business', 1)])
         self.assertEqual(self.cf.records, [])
         self.assertFalse(self.path.exists())
+
+    def test_transport_probe_error_does_not_roll_back_completed_deployment(self):
+        m.check_connectivity.side_effect = RuntimeError('probe unavailable')
+        with self.assertRaisesRegex(RuntimeError, 'probe unavailable'):
+            m.install(self.cf, self.args)
+        self.assertEqual(m.load(self.path)['status'], 'ready')
+        self.assertEqual(len(self.rows()), 4)
+        self.assertIsNotNone(self.cf.worker)
 
     def test_failed_cleanup_preserves_retryable_journal(self):
         self.cf.fail_add = self.cf.fail_cleanup = True
@@ -283,6 +313,27 @@ class DeploymentTests(unittest.TestCase):
             return argparse.Namespace(returncode=0, stdout='active', stderr='')
         with patch.object(m.xui.request, 'urlopen', return_value=io.BytesIO(script)), patch.object(m.xui, 'XUI_INSTALL_SHA256', hashlib.sha256(script).hexdigest()), patch.object(m.xui.subprocess, 'run', side_effect=run):
             self.assertEqual(m.xui.run_xui_install_script(), ('fake-user', 'fake-pass'))
+
+
+class SessionTokenTests(unittest.TestCase):
+    def setUp(self):
+        m.clear_token_cache()
+        self.addCleanup(m.clear_token_cache)
+
+    def test_session_reuses_token_without_disk_storage(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(m, 'getpass', return_value='fake-only') as prompt, patch.object(m, 'Cloudflare') as client:
+            m.cf_client()
+            m.cf_client()
+        prompt.assert_called_once()
+        self.assertEqual(client.call_count, 2)
+
+    def test_auth_failure_clears_memory_cache_for_next_attempt(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(m, 'getpass', side_effect=['bad-fake', 'new-fake']) as prompt, patch.object(m, 'Cloudflare'):
+            with self.assertRaises(APIError):
+                with m.cf_session():
+                    raise APIError('GET', '/zones', 403, [9109])
+            m.cf_client()
+        self.assertEqual(prompt.call_count, 2)
 
 
 class FixedPortTests(unittest.TestCase):
