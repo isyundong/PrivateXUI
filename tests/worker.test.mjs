@@ -6,11 +6,6 @@ import YAML from 'yaml';
 import worker, {SOURCE_TIMEOUT_MS, MAX_SOURCE_BYTES, MAX_ENDPOINTS} from '../worker.mjs';
 
 globalThis.crypto ??= webcrypto;
-// MD5 is a Workers Web Crypto extension used only by the public source API.
-const nativeDigest = crypto.subtle.digest.bind(crypto.subtle);
-crypto.subtle.digest = (algorithm, input) => algorithm === 'MD5'
-  ? Promise.resolve(Uint8Array.from(createHash('md5').update(input).digest()).buffer)
-  : nativeDigest(algorithm, input);
 globalThis.fetch = () => {throw new Error('Outbound network forbidden');};
 const token = 'A'.repeat(43);
 const uuid = '00000000-0000-4000-8000-000000000000';
@@ -198,56 +193,47 @@ function autoEnv(extra = {}) {
   return {SUB_CONFIG: JSON.stringify({...config, preferred_mode: 'auto', preferred: [], ...extra})};
 }
 
-function publicData(count = 10) {
-  return {data: Object.fromEntries(['ctcc', 'cucc', 'cmcc', 'bgp', 'ipv6'].map((key, group) => [key, {
-    info: Array.from({length: count}, (_, i) => ({
-      ip: key === 'ipv6' ? `2606:4700::${(i + 1).toString(16)}` : `104.16.${group}.${i + 1}`,
-      ping: '1ms', speed: '99MB/s',
-    })),
-  }]))};
+function publicData(count = 12, url = 'https://cf.090227.xyz/ct?ips=12') {
+  const group = new URL(url).pathname === '/cu' ? 1 : new URL(url).pathname === '/cmcc' ? 2 : 0;
+  return Array.from({length: count}, (_, i) => `104.16.${group}.${i + 1}#1ms 99MB/s`).join('\n');
 }
 
-test('auto mode restores domain pool plus 50 dynamic IPs without disclosing private config', async t => {
+test('auto mode merges domain pool plus three carrier IP sources without disclosing private config', async t => {
   const calls = [];
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     calls.push({url, options});
-    return Response.json(publicData());
+    return new Response(publicData(12, url));
   });
   const response = await get(`/s/${token}/Private-XUI.yaml?protocol=vless`, {
     headers: {Authorization: `Bearer ${token}`, Cookie: `secret=${token}`, Referer: `https://${config.domain}/${uuid}`},
   }, autoEnv());
   assert.equal(response.status, 200);
   const body = YAML.parse(await response.text());
-  assert.equal(body.proxies.length, 62); // 1 domain + 11 pooled domains + 50 distinct IPs
+  assert.equal(body.proxies.length, 48); // 1 domain + 11 pooled domains + 36 distinct IPs
   assert(body.proxies.every(proxy => proxy.type === 'vless'));
   assert.equal(body.proxies[0].server, config.domain);
   assert(body.proxies.some(proxy => proxy.name.includes('电信')));
   assert(!body.proxies.some(proxy => /1ms|99MB/.test(proxy.name))); // source measurements aren't user's
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map(c => c.url).sort(), ['https://cf.090227.xyz/cmcc?ips=12', 'https://cf.090227.xyz/ct?ips=12', 'https://cf.090227.xyz/cu?ips=12']);
   const call = calls[0];
-  const target = new URL(call.url);
-  assert.equal(target.origin + target.pathname, 'https://api.uouin.com/index.php/index/Cloudflare');
-  assert.deepEqual([...target.searchParams.keys()].sort(), ['key', 'time']);
-  const time = target.searchParams.get('time');
-  const inner = createHash('md5').update('DdlTxtN0sUOu').digest('hex');
-  assert.equal(target.searchParams.get('key'), createHash('md5').update(inner + '70cloudflareapikey' + time).digest('hex'));
   assert.equal(call.options.method, 'GET');
   assert.equal(call.options.redirect, 'error');
   assert.equal(call.options.credentials, 'omit');
   assert.equal(call.options.body, undefined);
-  const sent = JSON.stringify(call);
+  const sent = JSON.stringify(calls);
   for (const secret of [uuid, token, config.domain, config.subscription_domain, ...config.routes.map(route => route.path)]) {
     assert(!sent.includes(secret), `private value sent to public list provider`);
   }
 });
 
 test('auto mode supports every configured protocol and keeps TLS verification enabled', async t => {
-  t.mock.method(globalThis, 'fetch', async () => Response.json(publicData()));
+  t.mock.method(globalThis, 'fetch', async url => new Response(publicData(12, url)));
   const body = YAML.parse(await (await get(undefined, undefined, autoEnv())).text());
-  assert.equal(body.proxies.length, 186);
+  assert.equal(body.proxies.length, 144);
   for (const protocol of ['vless', 'trojan', 'vmess']) {
     const entries = body.proxies.filter(proxy => proxy.type === protocol);
-    assert.equal(entries.length, 62);
+    assert.equal(entries.length, 48);
     assert(entries.every(proxy => (proxy.sni || proxy.servername) === config.domain));
     assert(entries.every(proxy => proxy['skip-cert-verify'] === false));
   }
@@ -257,7 +243,7 @@ test('bad public addresses are rejected and repeated IPv4/IPv6 entries are dedup
   const bad = ['127.0.0.1', '10.0.0.1', '169.254.169.254', '192.0.2.1', '8.8.8.8', '::1',
     'fd00::1', 'fe80::1', '2606:4700::1/128', 'https://evil.example', 'node.example.com', '104.16.0.999'];
   const addresses = [...bad, '104.18.1.1', '104.18.1.1', '2606:4700::1', '2606:4700:0:0:0:0:0:1'];
-  t.mock.method(globalThis, 'fetch', async () => Response.json({data: {ctcc: {info: addresses.map(ip => ({ip}))}}}));
+  t.mock.method(globalThis, 'fetch', async () => new Response(addresses.join('\n')));
   const body = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, autoEnv())).text());
   assert.equal(body.proxies.length, 14);
   assert.equal(body.proxies.filter(proxy => proxy.server === '104.18.1.1').length, 1);
@@ -269,11 +255,11 @@ test('optional GitHub source is fixed, excludes non-CF hosts and keeps only port
   const calls = [];
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     calls.push({url, options});
-    if (url.startsWith('https://api.uouin.com/')) return Response.json(publicData(1));
+    if (url.startsWith('https://cf.090227.xyz/')) return new Response(publicData(1, url));
     return new Response('104.18.9.1:8443#unsupported\n104.18.9.3:443#supported\n[2606:4700::88]:443#IPv6\n104.18.9.2:80#not TLS\n8.8.8.8:443\nhttps://evil.example\nsaas.example#arbitrary host');
   });
   const body = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, autoEnv({preferred_github: true}))).text());
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 4);
   assert(calls.some(call => call.url === 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt'));
   assert.equal(body.proxies.find(proxy => proxy.server === '104.18.9.3').port, 443);
   assert(body.proxies.some(proxy => proxy.server === '2606:4700::88'));
@@ -313,7 +299,7 @@ test('source failures preserve DNS and domain pool with six explicitly named fal
   }
 });
 
-test('source deadline includes a stalled response body and aborts both optional requests', async t => {
+test('source deadline includes a stalled response body and aborts all source requests', async t => {
   const signals = [];
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     signals.push(options.signal);
@@ -325,7 +311,7 @@ test('source deadline includes a stalled response body and aborts both optional 
   assert(elapsed < SOURCE_TIMEOUT_MS + 2000, `source timeout took ${elapsed} ms`);
   assert.equal(response.status, 200);
   assert.equal(YAML.parse(await response.text()).proxies.length, 18);
-  assert.equal(signals.length, 2);
+  assert.equal(signals.length, 4);
   assert(signals.every(signal => signal.aborted));
 });
 
@@ -333,14 +319,14 @@ test('source response byte limit and endpoint limit bound generated subscription
   t.mock.method(globalThis, 'fetch', async () => new Response(' '.repeat(MAX_SOURCE_BYTES + 1)));
   let body = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, autoEnv())).text());
   assert.equal(body.proxies.length, 18);
-  t.mock.method(globalThis, 'fetch', async () => Response.json(publicData(200)));
+  t.mock.method(globalThis, 'fetch', async url => new Response(publicData(200, url)));
   body = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, autoEnv())).text());
   assert.equal(body.proxies.length, MAX_ENDPOINTS);
 });
 
 test('unauthorized, unknown query URLs, and offline modes cannot trigger public source fetches', async t => {
   const calls = [];
-  t.mock.method(globalThis, 'fetch', async url => {calls.push(url); return Response.json(publicData());});
+  t.mock.method(globalThis, 'fetch', async url => {calls.push(url); return new Response(publicData(12, url));});
   for (const query of ['source=https://127.0.0.1', 'piu=https://evil.example', 'preferred_url=https://evil.example']) {
     assert.equal((await get(`/s/${token}?${query}`, undefined, autoEnv())).status, 400);
   }
@@ -349,4 +335,14 @@ test('unauthorized, unknown query URLs, and offline modes cannot trigger public 
     assert.equal((await get(undefined, undefined, autoEnv({preferred_mode: mode}))).status, 200);
   }
   assert.equal(calls.length, 0);
+});
+
+test('one unavailable carrier does not remove other carrier lists', async t => {
+  t.mock.method(globalThis, 'fetch', async url => url.includes('/cu?')
+    ? new Response('offline', {status: 503}) : new Response(publicData(12, url)));
+  const body = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, autoEnv())).text());
+  assert.equal(body.proxies.length, 36); // 12 domain entries + 24 IPs
+  assert(body.proxies.some(p => p.name.includes('电信')));
+  assert(body.proxies.some(p => p.name.includes('移动')));
+  assert(!body.proxies.some(p => p.name.includes('CF 候选')));
 });

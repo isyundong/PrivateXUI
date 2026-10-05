@@ -10,7 +10,7 @@
 客户端使用节点 → node.example.com:443 → Cloudflare → VPS 上的 3x-ui/Xray
 ```
 
-订阅不访问 `yx-auto.pages.dev`、`url.v1.mk`，由你自己的 Worker 生成。自动优选模式恢复原作的公开 IP 数据来源和域名池；代码不把 UUID、节点路径或订阅令牌作为来源请求参数。
+订阅不访问 `yx-auto.pages.dev`、`url.v1.mk`，由你自己的 Worker 生成。自动优选模式使用 cf.090227.xyz 的公开 IP 数据及原作域名池；代码不把 UUID、节点路径或订阅令牌作为来源请求参数。
 
 ## 这版包含什么
 
@@ -140,14 +140,16 @@ Clash 订阅:   https://sub.example.com/s/随机令牌/Private-XUI.yaml
 
 入口模式有四种，在 **维护 → 订阅设置** 中选择：
 
-- `auto`：默认模式。自己的 Worker 请求固定公开接口 `https://api.uouin.com/index.php/index/Cloudflare`，合并原作的 11 个优选域名和自己的节点域名。接口样本是五组各十条，因此单协议可得到 `1 + 11 + 50 = 62` 条配置；这不是固定数量或可用性保证。三协议会分别生成对应连接配置，仍然共用一台 VPS。
+- `auto`：默认模式。自己的 Worker 并行请求 `https://cf.090227.xyz/ct?ips=12`、`/cu?ips=12`、`/cmcc?ips=12`，分别读取电信、联通、移动的纯文本 IP 列表；无需来源 API 密钥，也不使用 Cloudflare Token 取数。合并原作 11 个域名和自己的节点域名。按三组各 12 条计算，每协议去重前为 48 个入口（过滤后可能更少，实际以来源响应为准），这些仍共用一台 VPS。
 - `builtin`：六个 Cloudflare 静态候选 + 自己的域名，不访问公开地址源。
 - `direct`：每个已安装协议只生成自己的域名入口，不访问公开地址源。
 - `custom`：导入自有 JSON 地址列表，不自动联网更新。
 
-动态 IP 只接受 Cloudflare 官方 IPv4/IPv6 网段，按地址去重，所有客户端入口统一 443。每个源的请求和读取总限时 5 秒，最多 64 KiB，总入口最多 128 个。公开接口失败时，保留原域名和域名池，并用六个静态候选兜底。默认不开启原作的 GitHub 来源，与原部署器 `egi=no` 一致。
+动态 IP 只接受 Cloudflare 官方 IPv4/IPv6 网段，按地址去重，所有客户端入口统一 443。每个源的请求和读取总限时 5 秒，最多 64 KiB，总入口最多 128 个。单个运营商接口失败不影响其他来源；三个接口都无有效结果时，保留原域名和域名池，并用六个静态候选兜底。来源可能包含非 Cloudflare 官方网段的中转地址，这些地址会被过滤，数量不保证等于网站展示数量。默认不开启原作的 GitHub 来源，与原部署器 `egi=no` 一致。
 
 代码仅构造公开列表请求，不转发订阅 URL、UUID、密码、路径、Cookie 或 Authorization。Cloudflare 平台可能自行加入 `CF-Worker` 等来源标识，源站可能据此知道请求来自哪个 Zone；这不是匿名取数服务。若不希望接触公共来源，选择 `builtin`、`direct` 或 `custom`。参考 [Cloudflare 子请求请求头](https://developers.cloudflare.com/fundamentals/reference/http-headers/#cf-worker)。
+
+本项目在客户端每次拉取订阅时重新请求来源；请在客户端设置订阅自动更新。没有独立的服务器 Cron/KV 定时池，和 Cloudflare SOCKS5 项目的每 30 分钟定时池不同。优选域名本身保留为域名，由客户端按 DNS TTL 重新解析；无法保证来源运营者按特定频率更新。
 
 多个入口时，Clash 配置包含“自动选择”组，由客户端通过代理访问 `https://www.gstatic.com/generate_204`，每 300 秒检测可达性和延迟。它不是下载带宽测试，也不把公共源的结果当作你所在网络的实测结果。证书校验保持开启，TLS SNI/WS Host 仍为自己的节点域名。
 
@@ -232,6 +234,6 @@ npm test
 ## 代码来源与接口依据
 
 - `xui_backend.py` 从 [byJoey/xui-cf-deployer](https://github.com/byJoey/xui-cf-deployer/tree/c7c3d9a976819a8c300d62c5408c9330b3b23b02) 提取并修改必要的面板/数据库适配，去掉旧订阅服务、全局 SSL 改写、批量规则替换、自动修复其他客户端及菜单汉化逻辑。
-- `worker.mjs` 根据 [yx-auto](https://github.com/byJoey/yx-auto/tree/17bb2f6c8fcb8848e31230ffa4c9cb8f7a32659a) 的“节点配置 → 多协议订阅”功能重新实现；保留原作公开动态地址源与域名池的机制，替换订阅生成和格式转换为自己的 Worker；不使用原作者的订阅服务或第三方转换器。
+- `worker.mjs` 根据 [yx-auto](https://github.com/byJoey/yx-auto/tree/17bb2f6c8fcb8848e31230ffa4c9cb8f7a32659a) 的“节点配置 → 多协议订阅”功能重新实现；保留动态地址与域名池机制，公开 IP 源改为 [cf.090227.xyz API](https://cf.090227.xyz/#/api)，替换订阅生成和格式转换为自己的 Worker；不使用原作者的订阅服务或第三方转换器。
 - 新安装器来源固定到 [3x-ui e897b095](https://github.com/MHSanaei/3x-ui/blob/e897b0957a12c3a106f505e0551c18887b0528d6/install.sh)，本机绑定补丁在执行前应用并检查匹配。
 - [Worker 上传与 Secret](https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/)、[自定义域名 API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/methods/update/)、[按域名设置 SSL](https://developers.cloudflare.com/rules/configuration-rules/settings/)。

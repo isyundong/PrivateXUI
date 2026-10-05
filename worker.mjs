@@ -9,7 +9,11 @@ const HEADERS = {
   'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
 };
 
-const DYNAMIC_SOURCE = 'https://api.uouin.com/index.php/index/Cloudflare';
+const DYNAMIC_SOURCES = Object.freeze({
+  'https://cf.090227.xyz/ct?ips=12': '电信',
+  'https://cf.090227.xyz/cu?ips=12': '联通',
+  'https://cf.090227.xyz/cmcc?ips=12': '移动',
+});
 const GITHUB_SOURCE = 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
 export const SOURCE_TIMEOUT_MS = 5000;
 export const MAX_SOURCE_BYTES = 65536;
@@ -65,18 +69,9 @@ function cloudflareAddress(value) {
     : address.split('.').map(Number).join('.');
 }
 
-async function md5(value) {
-  // MD5 is only the public provider's time-signature scheme. Subscriber token
-  // verification remains SHA-256. Workers supports MD5 in its Web Crypto API.
-  const bytes = await crypto.subtle.digest('MD5', new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
-}
-
 async function publicList(url) {
   // No caller-supplied URL, headers, cookies, Referer, credentials, or body.
-  const parsed = new URL(url);
-  if (!((parsed.origin + parsed.pathname === DYNAMIC_SOURCE &&
-          [...parsed.searchParams.keys()].every(key => ['key', 'time'].includes(key))) || url === GITHUB_SOURCE)) {
+  if (!Object.hasOwn(DYNAMIC_SOURCES, url) && url !== GITHUB_SOURCE) {
     throw new Error('Unapproved address source');
   }
   const controller = new AbortController();
@@ -119,20 +114,14 @@ async function publicList(url) {
   }
 }
 
-async function dynamicIPs() {
-  const timestamp = String(Date.now());
-  // Public constants used by the original address-list API, not user secrets.
-  const signature = await md5(await md5('DdlTxtN0sUOu') + '70cloudflareapikey' + timestamp);
-  const groups = JSON.parse(await publicList(`${DYNAMIC_SOURCE}?key=${signature}&time=${timestamp}`)).data || {};
+async function carrierIPs(url, name) {
   const results = [];
-  for (const [key, name] of Object.entries({ctcc: '电信', cucc: '联通', cmcc: '移动', bgp: '多线', ipv6: 'IPv6'})) {
-    const entries = groups[key]?.info;
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries.slice(0, MAX_ENDPOINTS)) {
-      const address = cloudflareAddress(entry?.ip);
-      if (address) results.push({address, name: `公开优选 · ${name}`});
-      if (results.length >= MAX_ENDPOINTS) return results;
-    }
+  for (const line of (await publicList(url)).split(/\r?\n/)) {
+    // Documented response: one IP per line, optionally followed by #label.
+    // Never copy provider-controlled labels into names or accept non-CF relays.
+    const address = cloudflareAddress(line.split('#')[0].trim());
+    if (address) results.push({address, name: `公开优选 · ${name}`});
+    if (results.length >= MAX_ENDPOINTS) break;
   }
   return results;
 }
@@ -155,7 +144,7 @@ async function githubIPs() {
 
 export async function automaticEndpoints(includeGithub = false) {
   // This function deliberately cannot receive subscription config or Request.
-  const sources = [dynamicIPs()];
+  const sources = Object.entries(DYNAMIC_SOURCES).map(([url, name]) => carrierIPs(url, name));
   if (includeGithub === true) sources.push(githubIPs());
   const settled = await Promise.allSettled(sources);
   const ips = settled.flatMap(result => result.status === 'fulfilled' ? result.value : []);
