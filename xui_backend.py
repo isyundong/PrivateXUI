@@ -11,7 +11,7 @@ import json
 import os
 
 
-import random
+import errno
 
 
 import re
@@ -73,10 +73,7 @@ XUI_INSTALL_SHA256 = "616d1758c993316d6b72fbe2c18b441d6003c05bf82d3c179e69550106
 XUI_INSTALL_STDIN = "\nn\n4\n\n"
 
 
-PORT_MIN = 10000
-
-
-PORT_MAX = 60000
+DEFAULT_NODE_PORTS = {"vless": 17001, "trojan": 17002, "vmess": 17003}
 
 
 PROTOCOL_ORDER = ["vless", "trojan", "vmess"]
@@ -961,21 +958,40 @@ def load_existing_ports_api(client: XuiPanelClient) -> Set[int]:
     return ports
 
 
-def random_ports(count: int, existing: Set[int]) -> List[int]:
-    selected = set()
-    for _ in range(10000):
-        if len(selected) == count:
-            return list(selected)
-        p = random.randint(PORT_MIN, PORT_MAX)
-        if p in existing or p in selected:
-            continue
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.bind(("0.0.0.0", p))
-        except OSError:
-            continue
-        selected.add(p)
-    raise ValueError("无法找到足够的空闲端口")
+def check_ports_available(ports: List[int]) -> None:
+    """Probe both listener families without starting services or changing firewalls."""
+    families = [(socket.AF_INET, "0.0.0.0")]
+    if socket.has_ipv6:
+        families.append((socket.AF_INET6, "::"))
+    for port in ports:
+        for family, host in families:
+            try:
+                with socket.socket(family, socket.SOCK_STREAM) as probe:
+                    if family == socket.AF_INET6:
+                        probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                    probe.bind((host, port))
+            except OSError as exc:
+                if family == socket.AF_INET6 and exc.errno in (
+                    errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL,
+                ):
+                    continue  # IPv6 is unavailable/disabled on this IPv4 VPS.
+                raise ValueError(
+                    f"TCP {port} 已被占用或无法绑定：{exc.strerror or exc}。"
+                    "请释放该端口，或取消对应协议；不会自动更换端口。"
+                ) from None
+
+
+def default_ports(protocols: List[str], existing: Set[int]) -> List[int]:
+    # Map by protocol, not selection order: VMess alone must still use 17003.
+    ports = [DEFAULT_NODE_PORTS[protocol] for protocol in protocols]
+    conflicts = sorted(set(ports) & existing)
+    if conflicts:
+        raise ValueError(
+            "默认端口已被 3x-ui 入站配置占用：" + ", ".join(map(str, conflicts))
+            + "。请处理原入站，或取消对应协议；不会自动更换端口。"
+        )
+    check_ports_available(ports)
+    return ports
 
 
 def parse_protocol_selection(raw: str) -> List[str]:

@@ -67,6 +67,8 @@ def install_questions(state_path, report, installed):
     print('\n请核对：')
     print('  服务器: %s；节点: %s；订阅: %s' % (address, node, subscription))
     print('  协议: %s；输出: Clash/Mihomo YAML' % protocols)
+    print('  VPS 回源 TCP 端口: ' + '、'.join('%s=%s' % (p.upper(), m.xui.DEFAULT_NODE_PORTS[p]) for p in protocols.split(',')))
+    print('  请在系统防火墙和云安全组放行上述端口，并保留实际 SSH 端口（默认 22）。')
     print('  面板: ' + ('复用已安装的 3x-ui' if installed else '自动安装 3x-ui，管理面板仅监听本机'))
     print('  节点回源使用 HTTP WebSocket；SSL 设置仅作用于这个节点域名。')
     if not confirm('开始部署', default=True):

@@ -138,6 +138,10 @@ def print_links(state):
     print(f'其他客户端（Base64，可选）: {base}?format=base64')
     for route in state['routes']:
         print(f'仅 {route["protocol"].upper()} 的 Clash 订阅: {base}?protocol={route["protocol"]}')
+    ports = '、'.join(f'{route["protocol"].upper()}={route["port"]}' for route in state['routes'])
+    print(f'VPS 需要放行的节点回源 TCP 端口: {ports}')
+    print('另保留实际 SSH 端口（默认 22）；通过 SSH 隧道访问面板时，无需额外开放面板端口。')
+    print('请核对系统防火墙和云安全组；本工具不会自动修改防火墙。')
 
 
 def preflight(cf, args):
@@ -172,6 +176,7 @@ def install(cf, args):
     if args.fresh:
         if xui.is_xui_installed():
             raise ValueError('已有 3x-ui，请去掉 --fresh')
+        xui.default_ports(protocols, set())
         xui.ensure_xui_for_fresh_setup()
     if not xui.is_xui_installed():
         raise ValueError('未找到本机 3x-ui；请先安装，或在裸机使用 --fresh')
@@ -181,7 +186,7 @@ def install(cf, args):
     else:
         with contextlib.closing(sqlite3.connect(xui.DB_PATH)) as conn:
             ports = xui.load_existing_ports_db(conn)
-    allocated = xui.random_ports(len(protocols), ports)
+    allocated = xui.default_ports(protocols, ports)
     ip = str(ipaddress.IPv4Address(args.ipv4 or xui.get_public_ipv4()))
     deployment_id = uuid.uuid4().hex
     credential = str(uuid.uuid4())
@@ -351,7 +356,8 @@ def parser():
     create.add_argument('--node-domain')
     create.add_argument('--sub-domain')
     create.add_argument('--ipv4', help='VPS 公网 IPv4；省略时自动查询')
-    create.add_argument('--protocols', default='vless,trojan,vmess')
+    create.add_argument('--protocols', default='vless,trojan,vmess',
+                        help='协议列表；固定回源 TCP 端口：vless=17001，trojan=17002，vmess=17003')
     create.add_argument('--preferred', help='自有优选地址 JSON 文件（可选）')
     create.add_argument('--fresh', action='store_true', help='裸机先安装固定版本来源的 3x-ui 安装器')
     commands.add_parser('show', help='只读显示订阅链接')

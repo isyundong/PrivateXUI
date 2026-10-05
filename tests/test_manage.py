@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import socket
 import sys
 import tempfile
 import unittest
@@ -93,6 +94,7 @@ class DeploymentTests(unittest.TestCase):
         self.args = argparse.Namespace(state=str(self.path), node_domain='node.example.com', sub_domain='sub.example.com',
             protocols='vless,trojan,vmess', ipv4='192.0.2.10', preferred=None, fresh=False)
         for obj, name, value in [(m.xui, 'DB_PATH', str(self.db)), (m.xui, 'restart_xui_service', Mock()),
+                                  (m.xui, 'check_ports_available', Mock()),
                                   (m.xui, 'is_xui_installed', lambda: True), (m, 'panel_for', lambda backend=None: ('db', None))]:
             p = patch.object(obj, name, value)
             p.start()
@@ -113,6 +115,10 @@ class DeploymentTests(unittest.TestCase):
         m.install(self.cf, self.args)
         state = m.load(self.path)
         self.assertEqual(state['status'], 'ready')
+        self.assertEqual({r['protocol']: r['port'] for r in state['routes']},
+                         {'vless': 17001, 'trojan': 17002, 'vmess': 17003})
+        self.assertEqual({r['action_parameters']['origin']['port'] for r in self.cf.rules['http_request_origin']
+                          if r['ref'] != 'business-origin'}, {17001, 17002, 17003})
         self.assertEqual(len(self.rows()), 4)
         self.assertTrue(all(row[2] == 0 for row in self.rows()[1:]))
         self.assertEqual(state['subscription_token'].__len__(), 43)
@@ -133,6 +139,44 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse(self.cf.domains)
         self.assertIsNone(self.cf.worker)
         self.assertFalse(self.path.exists())
+
+    def test_protocol_subset_keeps_its_assigned_port(self):
+        self.args.protocols = 'vmess'
+        m.install(self.cf, self.args)
+        state = m.load(self.path)
+        self.assertEqual([(r['protocol'], r['port']) for r in state['routes']], [('vmess', 17003)])
+        self.assertEqual(len(self.rows()), 2)
+
+    def test_existing_inbound_port_conflict_stops_before_resource_writes(self):
+        with contextlib.closing(sqlite3.connect(self.db)) as c, c:
+            c.execute('UPDATE inbounds SET port=17002 WHERE id=1')
+        with self.assertRaisesRegex(ValueError, '17002'):
+            m.install(self.cf, self.args)
+        self.assertEqual(self.rows(), [(1, 'business', 1)])
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.cf.calls, [])
+
+    def test_fresh_setup_checks_port_conflicts_before_installing_panel(self):
+        self.args.fresh = True
+        with patch.object(m.xui, 'is_xui_installed', return_value=False), patch.object(m.xui, 'ensure_xui_for_fresh_setup') as fresh:
+            m.xui.check_ports_available.side_effect = ValueError('17001 occupied')
+            with self.assertRaisesRegex(ValueError, '17001'):
+                m.install(self.cf, self.args)
+        fresh.assert_not_called()
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.cf.calls, [])
+
+    def test_show_legacy_deployment_displays_actual_ports_without_migration(self):
+        m.install(self.cf, self.args)
+        state = m.load(self.path)
+        state['routes'][0]['port'] = 32101
+        before = copy.deepcopy(state)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            m.print_links(state)
+        self.assertIn('VLESS=32101', output.getvalue())
+        self.assertNotIn('VLESS=17001', output.getvalue())
+        self.assertEqual(state, before)
 
     def test_failed_install_automatically_cleans_created_resources(self):
         self.cf.fail_add = True
@@ -239,6 +283,34 @@ class DeploymentTests(unittest.TestCase):
             return argparse.Namespace(returncode=0, stdout='active', stderr='')
         with patch.object(m.xui.request, 'urlopen', return_value=io.BytesIO(script)), patch.object(m.xui, 'XUI_INSTALL_SHA256', hashlib.sha256(script).hexdigest()), patch.object(m.xui.subprocess, 'run', side_effect=run):
             self.assertEqual(m.xui.run_xui_install_script(), ('fake-user', 'fake-pass'))
+
+
+class FixedPortTests(unittest.TestCase):
+    def test_mapping_is_stable_across_order_and_unselected_conflicts(self):
+        with patch.object(m.xui, 'check_ports_available') as check:
+            self.assertEqual(m.xui.default_ports(['vmess', 'vless', 'trojan'], set()), [17003, 17001, 17002])
+            self.assertEqual(m.xui.default_ports(['trojan'], {17001, 17003}), [17002])
+        check.assert_called_with([17002])
+
+    def test_real_ipv4_listener_conflict_is_rejected(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+            with self.assertRaisesRegex(ValueError, str(port)):
+                m.xui.check_ports_available([port])
+
+    def test_real_ipv6_only_listener_conflict_is_rejected(self):
+        if not socket.has_ipv6:
+            self.skipTest('IPv6 unavailable')
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as listener:
+            listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            try:
+                listener.bind(('::1', 0))
+            except OSError:
+                self.skipTest('IPv6 loopback unavailable')
+            port = listener.getsockname()[1]
+            with self.assertRaisesRegex(ValueError, str(port)):
+                m.xui.check_ports_available([port])
 
 
 class APIClientTests(unittest.TestCase):

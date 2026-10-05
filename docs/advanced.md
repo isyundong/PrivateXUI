@@ -30,7 +30,7 @@
 - 本机 SQLite 版 3x-ui；优先使用自动检测到的面板 API Token，未检测到时使用数据库方式。
 - 已托管到 Cloudflare 的域名、已启用 Workers 的 Cloudflare 账号。
 - 两个空闲域名：如 `node.example.com` 和 `sub.example.com`。可以来自同一账号的不同 Zone；必须不同，避免 Worker 接管节点连接。
-- VPS 回源端口必须允许 Cloudflare 访问。脚本会避开当前已监听端口，但不会改动系统/云防火墙。建议在防火墙中限制来源为 Cloudflare，而不是直接暴露所有节点端口。
+- VPS 回源 TCP 端口固定为 VLESS `17001`、Trojan `17002`、VMess `17003`，只使用选中的协议端口，与选择顺序无关。端口必须允许 Cloudflare 访问；已有入站配置或系统监听占用时会停止，不会自动随机换端口。工具不会改动系统/云防火墙，建议限制节点端口来源为 Cloudflare IP 段。
 - Worker 自定义域名的 DNS 和证书由 Cloudflare 管理；首次生效需要等待。
 
 此版保留原部署方式中的 **Cloudflare → VPS 明文 WebSocket 回源**。SSL Flexible 只通过 Configuration Rule 应用于节点域名，**不会修改整个 Zone 的 SSL 模式**。如果要求全链路 TLS，需要进一步为 Xray/反向代理配置源站证书后使用 Full (strict)。
@@ -144,6 +144,8 @@ sudo private-xui uninstall
 不要直接删除状态文件后重装，否则会丢失资源归属和恢复信息。可以用 `private-xui --state /你的私有目录/state.json ...` 指定其他状态路径。
 
 ## 从原项目迁移
+
+此前已用本工具部署的随机端口不会被自动改动。查看订阅时会显示实际端口；仅更新工具或 Worker 仍保留旧端口。若要切换到 `17001/17002/17003`，先卸载本项目配置，再重新安装；新安装会更换节点凭据和订阅链接，需要重新导入客户端。
 
 本版使用独立状态文件，不自动读取旧订阅快照，不会继续输出作者域名的订阅，也不尝试修改原部署记录。建议使用一对新的空闲子域名部署，验证新节点后停用旧入站，再核对并清理原 Cloudflare 资源。新安装会生成新的节点 UUID 和订阅令牌。
 
