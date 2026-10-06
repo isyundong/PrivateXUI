@@ -15,9 +15,9 @@ const DYNAMIC_SOURCES = Object.freeze({
   'https://cf.090227.xyz/cmcc?ips=12': '移动',
 });
 const GITHUB_SOURCE = 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
-export const SOURCE_TIMEOUT_MS = 5000;
-export const MAX_SOURCE_BYTES = 65536;
-export const MAX_ENDPOINTS = 128;
+const SOURCE_TIMEOUT_MS = 5000;
+const MAX_SOURCE_BYTES = 65536;
+const MAX_ENDPOINTS = 128;
 const DOMAIN_POOL = [
   'cloudflare.182682.xyz', 'freeyx.cloudflare88.eu.org', 'bestcf.top',
   'cdn.2020111.xyz', 'cf.0sm.com', 'cf.090227.xyz', 'cf.zhetengsha.eu.org',
@@ -87,7 +87,9 @@ async function publicList(url) {
   try {
     return await Promise.race([timeout, (async () => {
       const response = await fetch(url, {
-        method: 'GET', redirect: 'error', credentials: 'omit',
+        // Workers rejects redirect:error before issuing the request.
+        // manual plus response.ok below rejects 3xx without following them.
+        method: 'GET', redirect: 'manual', credentials: 'omit',
         headers: {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json, text/plain'},
         signal: controller.signal,
       });
@@ -142,7 +144,7 @@ async function githubIPs() {
   return results;
 }
 
-export async function automaticEndpoints(includeGithub = false) {
+async function automaticEndpoints(includeGithub = false) {
   // This function deliberately cannot receive subscription config or Request.
   const sources = Object.entries(DYNAMIC_SOURCES).map(([url, name]) => carrierIPs(url, name));
   if (includeGithub === true) sources.push(githubIPs());
@@ -178,7 +180,7 @@ async function authorized(token, expected) {
   return difference === 0;
 }
 
-export function nodes(config, protocol) {
+function nodes(config, protocol) {
   // A candidate address changes only the Cloudflare entry point; SNI/Host and
   // the origin credentials stay the same. Keep the normal DNS entry as fallback.
   const seen = new Set();
@@ -201,7 +203,7 @@ export function nodes(config, protocol) {
   })));
 }
 
-export function uri(node) {
+function uri(node) {
   const server = node.server.includes(':') ? `[${node.server}]` : node.server;
   if (node.protocol === 'vmess') {
     return 'vmess://' + base64(JSON.stringify({
@@ -236,7 +238,7 @@ function yaml(value, depth = 0) {
   }).join('\n');
 }
 
-export function clash(list) {
+function clash(list) {
   // Quote every string so paths, Unicode names and credentials remain literal YAML.
   const proxies = list.map(node => ({
     name: node.name, type: node.protocol, server: node.server, port: node.port,

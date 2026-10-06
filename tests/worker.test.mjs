@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {webcrypto, createHash} from 'node:crypto';
 import fs from 'node:fs';
 import YAML from 'yaml';
-import worker, {SOURCE_TIMEOUT_MS, MAX_SOURCE_BYTES, MAX_ENDPOINTS} from '../worker.mjs';
+import worker from '../worker.mjs';
+// Public limits verified by behavior; the Worker entry exports only its handler.
+const SOURCE_TIMEOUT_MS = 5000, MAX_SOURCE_BYTES = 65536, MAX_ENDPOINTS = 128;
 
 globalThis.crypto ??= webcrypto;
 globalThis.fetch = () => {throw new Error('Outbound network forbidden');};
@@ -218,7 +220,7 @@ test('auto mode merges domain pool plus three carrier IP sources without disclos
   assert.deepEqual(calls.map(c => c.url).sort(), ['https://cf.090227.xyz/cmcc?ips=12', 'https://cf.090227.xyz/ct?ips=12', 'https://cf.090227.xyz/cu?ips=12']);
   const call = calls[0];
   assert.equal(call.options.method, 'GET');
-  assert.equal(call.options.redirect, 'error');
+  assert.equal(call.options.redirect, 'manual');
   assert.equal(call.options.credentials, 'omit');
   assert.equal(call.options.body, undefined);
   const sent = JSON.stringify(calls);
