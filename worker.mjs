@@ -260,10 +260,28 @@ function clash(list) {
     });
   }
   return yaml({
-    'mixed-port': 7890, 'allow-lan': false, mode: 'rule',
+    'mixed-port': 7890, 'allow-lan': false, 'bind-address': '127.0.0.1', mode: 'rule',
+    // IPv6 stays enabled for TUN capture, but AAAA answers and IPv6 exits are blocked.
+    ipv6: true,
+    tun: {
+      enable: true, stack: 'gvisor', 'auto-route': true, 'strict-route': true,
+      'auto-detect-interface': true, 'dns-hijack': ['any:53', 'tcp://any:53'],
+      'inet6-address': ['fdfe:dcba:9876::1/126'],
+      'route-address': ['0.0.0.0/0', '::/0'],
+    },
+    dns: {
+      enable: true, listen: '127.0.0.1:1053', ipv6: false,
+      'enhanced-mode': 'fake-ip', 'fake-ip-range': '198.18.0.1/16',
+      'respect-rules': true, 'prefer-h3': false,
+      'default-nameserver': ['https://1.1.1.1/dns-query'],
+      'proxy-server-nameserver': ['https://1.1.1.1/dns-query#DIRECT', 'https://1.0.0.1/dns-query#DIRECT'],
+      'direct-nameserver': ['https://1.1.1.1/dns-query#DIRECT', 'https://1.0.0.1/dns-query#DIRECT'],
+      nameserver: ['https://1.1.1.1/dns-query#PROXY', 'https://1.0.0.1/dns-query#PROXY'],
+    },
     proxies,
     'proxy-groups': groups,
-    rules: ['MATCH,PROXY'],
+    // DNS is intercepted before routing. Other UDP (including STUN/QUIC) is blocked.
+    rules: ['IP-CIDR6,::/0,REJECT,no-resolve', 'NETWORK,udp,REJECT', 'MATCH,PROXY'],
   }) + '\n';
 }
 

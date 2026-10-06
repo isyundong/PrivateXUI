@@ -80,3 +80,7 @@ private-xui
 旧客户端配置可能保留之前的随机显示名，需手动改名或用新地址重新导入。不要导入带 `?protocol=vless` 的旧单协议链接，除非只需要 VLESS。
 
 开发者：[测试与构建](docs/development.md) · [上游来源](docs/advanced.md#代码来源与接口依据)
+
+## 客户端 TUN 与 DNS
+
+完整订阅已包含偏隐私的 TUN、DNS 和路由配置：网站 DNS 经代理加密查询，捕获的 IPv6 目标流量和非 DNS 的普通 UDP 被拒绝，可能影响视频通话、游戏和 QUIC。Clash Verge Rev 仍需启用 TUN 并检查配置覆盖；Linux Mihomo 需要对应权限。更新时刷新完整配置，不能只更新节点。详见 [多设备设置与保护边界](docs/privacy.md)。

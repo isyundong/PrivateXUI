@@ -348,3 +348,12 @@ test('one unavailable carrier does not remove other carrier lists', async t => {
   assert(body.proxies.some(p => p.name.includes('移动')));
   assert(!body.proxies.some(p => p.name.includes('CF 候选')));
 });
+
+test('full Clash config includes TUN, encrypted proxy DNS and restrictive traffic rules',async()=>{
+  const c=YAML.parse(await(await get()).text());assert.equal(c.tun.enable,true);assert.equal(c.tun['strict-route'],true);
+  assert.deepEqual(c.tun['dns-hijack'],['any:53','tcp://any:53']);assert(c.tun['route-address'].includes('::/0'));
+  assert.equal(c.ipv6,true);assert.equal(c.dns.ipv6,false);assert.equal(c.dns['enhanced-mode'],'fake-ip');
+  assert(c.dns.nameserver.every(s=>s.startsWith('https://')&&s.endsWith('#PROXY')));
+  assert(c.dns['proxy-server-nameserver'].every(s=>s.startsWith('https://')&&s.endsWith('#DIRECT')));
+  assert.deepEqual(c.rules,['IP-CIDR6,::/0,REJECT,no-resolve','NETWORK,udp,REJECT','MATCH,PROXY']);
+});
