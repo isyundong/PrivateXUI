@@ -481,6 +481,12 @@ def parser():
     check.add_argument('--local-only', action='store_true', help='只检查本机环境，不查询公网 IP')
     check.add_argument('--quiet', action='store_true', help='检查通过时不输出')
     commands.add_parser('panel', help='查看本工具保存的面板访问信息')
+    dashboard_parser = commands.add_parser('dashboard', help='终端流量与连接历史 Dashboard')
+    dashboard_parser.add_argument('action', choices=['open', 'install', 'status', 'collect', 'uninstall'], nargs='?', default='open')
+    dashboard_parser.add_argument('--retention-days', type=int, default=30, help='首次安装历史保留天数（1–30）')
+    dashboard_parser.add_argument('--access-log', help='复用现有 Xray 访问日志；不修改其配置或轮转策略')
+    dashboard_parser.add_argument('--yes', action='store_true', help='确认安装/卸载 Dashboard')
+
     cloud = commands.add_parser('check-cloudflare', help='只读检查 Cloudflare 凭据和域名访问权限')
     cloud.add_argument('--domain', help='可选：检查节点域名所在 Zone 是否在授权范围内')
     commands.add_parser('check-connectivity', help='检查经过 Cloudflare 的节点回源握手，不修改防火墙')
@@ -506,6 +512,12 @@ def run_cloud_command(cf, args):
     else:
         state = load(args.state)
         if args.command == 'uninstall':
+            import dashboard
+            if dashboard.CONFIG.exists():
+                dashboard_config = json.loads(dashboard.CONFIG.read_text())
+                if dashboard_config.get('state') == str(Path(args.state).resolve()):
+                    import dashboard_service
+                    dashboard_service.uninstall(argparse.Namespace(yes=True))
             if cleanup(cf, state, args.state):
                 raise ValueError('清理未完成，状态文件保留供重试')
             print('已清理本项目资源；3x-ui 面板和其他节点保留。')
@@ -530,6 +542,10 @@ def main(argv=None):
             if not args.quiet or not report['supported']:
                 print_report(report)
             require_supported(report)
+            return
+        if args.command == 'dashboard':
+            from dashboard_service import command
+            command(args)
             return
         if args.command == 'panel':
             from wizard import panel_information

@@ -287,3 +287,29 @@ class GuidedUITests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class TelemetryTUITests(unittest.TestCase):
+    def test_pages_period_switch_refresh_and_narrow_layouts(self):
+        import time
+        now=int(time.time());calls=[]
+        def source(days,query):
+            calls.append((days,query))
+            return {'now':now,'totals':{'up':1024,'down':2048,'connections':12},'rates':{'down':120},
+                    'points':[{'ts':now-60,'up':512,'down':1024}],
+                    'top':[{'target':'long.example.com','connections':12}],
+                    'history':[{'ts':now,'target':'long.example.com','port':443,'protocol':'vless','outcome':'accepted'}],
+                    'meta':{'sample_at':str(now),'gaps':'0'},'status':{'traffic':'正常','history':'正常'},'ip_only':0,'counters':[]}
+        for dimensions in [(20,52),(24,80),(32,120)]:
+            with self.subTest(dimensions=dimensions),patch.object(tui.curses,'has_colors',return_value=False),patch.object(tui.curses,'curs_set'):
+                screen=Screen(['2','3',tui.curses.KEY_RIGHT,'r','1','q'],dimensions)
+                ui=tui.TerminalUI(screen);ui.dashboard(source)
+                text='\n'.join(row[2] for row in screen.writes)
+                self.assertIn('Dashboard',text);self.assertIn('连接历史',text);self.assertIn('long.example.com',text)
+                self.assertTrue(any('7 天' in row[2] for row in screen.writes))
+        self.assertIn((7,''),calls)
+
+    def test_dashboard_error_is_visible_and_escape_returns(self):
+        with patch.object(tui.curses,'has_colors',return_value=False),patch.object(tui.curses,'curs_set'):
+            screen=Screen(['q']);ui=tui.TerminalUI(screen)
+            ui.dashboard(lambda *_:(_ for _ in ()).throw(ValueError('尚未启用采集')))
+            self.assertTrue(any('尚未启用采集' in row[2] for row in screen.writes))

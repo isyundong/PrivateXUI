@@ -84,3 +84,14 @@ private-xui
 ## 客户端 TUN 与 DNS
 
 完整订阅已包含偏隐私的 TUN、DNS 和路由配置：网站 DNS 经代理加密查询，捕获的 IPv6 目标流量和非 DNS 的普通 UDP 被拒绝，可能影响视频通话、游戏和 QUIC。Clash Verge Rev 仍需启用 TUN 并检查配置覆盖；Linux Mihomo 需要对应权限。更新时刷新完整配置，不能只更新节点。详见 [多设备设置与保护边界](docs/privacy.md)。
+
+## TUI Dashboard
+
+在 SSH 终端查看流量趋势、热门域名和连接历史，无网页、无新增端口。
+
+```bash
+private-xui dashboard install  # 首次启用后台采集
+private-xui dashboard          # 打开终端 Dashboard
+```
+
+也可从 **维护 → Dashboard · 流量与历史** 进入。历史从启用后开始记录，默认保留 30 天；若需开启访问日志，会提示重启 x-ui。详见 [使用与统计边界](docs/dashboard.md)。

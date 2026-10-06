@@ -302,6 +302,8 @@ class GuidedUI:
                     self.install(installed)
                 elif selected == 'subscription':
                     self.task(lambda: show_subscription(self.state_path))
+                elif selected == 'dashboard':
+                    self.dashboard_menu()
                 elif selected == 'auto-settings':
                     self.settings(suggest_auto=True)
                 else:
@@ -350,6 +352,7 @@ class GuidedUI:
                 ('check', '连接与凭据检查', '检查节点回源、Cloudflare 权限或系统环境'),
                 ('panel', '查看面板访问', '显示面板账号和 SSH 隧道访问方法'),
                 ('rotate', '更换订阅令牌', '使旧订阅地址失效，完成后需重新导入客户端'),
+                ('dashboard', 'Dashboard · 流量与历史', '终端查看流量趋势、连接记录与热门域名'),
                 ('uninstall', '卸载 / 清理未完成部署', '只清理本项目；保留 3x-ui 和其他节点'),
             ], subtitle='维护 · Esc 返回首页')
             if selected is None:
@@ -358,6 +361,8 @@ class GuidedUI:
                 self.command('update-worker', preferred=None, preferred_mode=None, subscription_name=None)
             elif selected == 'settings':
                 self.settings()
+            elif selected == 'dashboard':
+                self.dashboard_menu()
             elif selected == 'panel':
                 self.task(panel_information)
             elif selected == 'check':
@@ -368,8 +373,37 @@ class GuidedUI:
             elif selected == 'uninstall':
                 state = m.load(self.state_path)
                 if self.ui.confirm('卸载本项目', ['节点   ' + state['domain'], '订阅   ' + state['subscription_domain'],
-                                               '清理本项目节点、Worker、DNS 和规则。', '保留 3x-ui 面板及其他节点。'], destructive=True):
+                                               '清理本项目节点、Worker、DNS、规则及 Dashboard 采集。', '保留 3x-ui 面板及其他节点。'], destructive=True):
                     self.command('uninstall')
+
+    def dashboard_menu(self):
+        import dashboard_service as service
+        import dashboard as dash
+        while True:
+            installed = dash.CONFIG.exists()
+            action = self.ui.choose('Dashboard · 终端流量与历史', [
+                ('open', '打开 Dashboard', '终端内查看概览、热门域名和连接历史'),
+                ('install', '启用 / 更新采集', '后台保存统计；没有网页和监听端口'),
+                ('status', '查看采集状态', '查看本机采集服务状态和保留时间'),
+                ('uninstall', '停止并卸载采集', '保留统计历史；不删除节点和订阅'),
+            ], summary=['状态   ' + ('已有本机配置' if installed else '尚未启用'),
+                        '默认保留 30 天，连接记录最多 10 万条。'], initial='open' if installed else 'install')
+            if action is None:
+                return
+            if action == 'open':
+                self.ui.dashboard(dash.read_snapshot)
+                continue
+            if action == 'install':
+                if not self.ui.confirm('启用后台采集', [
+                    '记录本项目流量与目标域名/IP，供 TUI 查看。',
+                    '若需开启 Xray 全局访问日志，将重启 x-ui，短暂断线。',
+                    'TUI 只统计本项目；短期原始日志可能包含其他入站。',
+                    '已有日志复用；新建原始日志配置轮转。']):
+                    continue
+            if action == 'uninstall' and not self.ui.confirm('卸载采集', ['停止采集，历史数据保留。', '按需恢复自己修改的日志字段；可能短暂重启 x-ui。'], destructive=True):
+                continue
+            args = argparse.Namespace(state=self.state_path, action=action, retention_days=30, access_log=None, yes=True)
+            self.task(lambda: service.command(args))
 
     def settings(self, *, suggest_auto=False):
         import manage as m
@@ -455,7 +489,7 @@ def text_menu(state_path, report):
 
 def text_maintenance(state_path):
     import manage as m
-    print('\n维护：1 更新订阅  2 订阅设置  3 连接检查  4 面板  5 更换令牌  6 卸载  0 返回')
+    print('\n维护：1 更新订阅  2 订阅设置  3 连接检查  4 面板  5 更换令牌  6 卸载  7 Dashboard  0 返回')
     choice = input('选择: ').strip()
     options = {'quiet_links': True}
     command = None
@@ -477,6 +511,11 @@ def text_maintenance(state_path):
         operation(panel_information, state_path)
     elif choice == '5' and confirm('旧订阅链接将失效，确认更换令牌'):
         command = 'rotate-token'
+    elif choice == '7':
+        import dashboard as dash
+        import dashboard_service as service
+        action = ask('Dashboard：1 打开 TUI / 2 启用采集 / 3 停止采集 / 4 状态', lambda v: {'1':'open','2':'install','3':'uninstall','4':'status'}[v], default='1' if dash.CONFIG.exists() else '2')
+        operation(lambda: service.command(argparse.Namespace(state=state_path, action=action, retention_days=30, access_log=None, yes=False)), state_path)
     elif choice == '6' and confirm('删除本项目节点和订阅，保留面板及其他节点，确认卸载'):
         command = 'uninstall'
     if command:

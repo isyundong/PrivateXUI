@@ -244,12 +244,16 @@ class TerminalUI:
                         hint = '← → / ↑ ↓ 选择   Enter 确认   1–4 快捷键   A 优选设置   Q 退出'
                 else:
                     hint = '← → / ↑ ↓ 选择   Enter 确认   1–4 快捷键   Q 退出'
+                if width >= 90:
+                    hint += '   D Dashboard'
                 self.footer(hint)
             key = self.key()
             if key in ('q', 'Q', '\x1b', '\x03', '0'):
                 return None
             if not ready:
                 continue
+            if key in ('d', 'D'):
+                return 'dashboard'
             if key in ('a', 'A') and model.get('shortcut'):
                 return model['shortcut']
             if key in (curses.KEY_LEFT, curses.KEY_UP, 'h', 'k', '\x10'):
@@ -260,6 +264,167 @@ class TerminalUI:
                 return items[selected][0]
             elif isinstance(key, str) and key in '123456789' and int(key) <= len(items):
                 return items[int(key) - 1][0]
+
+    def dashboard(self, provider):
+        """Read-only, live terminal dashboard. No browser, sockets or credentials."""
+        import time
+        page, day_index, offset, query = 0, 0, 0, ''
+        periods = [1, 7, 30]
+        labels = ['24 小时', '7 天', '30 天']
+        data, error, next_refresh, paused = None, '', 0, False
+        self.screen.timeout(1000)
+
+        def size(value):
+            value = max(0, float(value or 0))
+            units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+            index = 0
+            while value >= 1024 and index < 4:
+                value /= 1024
+                index += 1
+            return ('%.1f ' if index else '%.0f ') % value + units[index]
+
+        def stamp(value):
+            return time.strftime('%m-%d %H:%M', time.localtime(int(value)))
+
+        def padded(value, width):
+            value = elide(value, width)
+            return value + ' ' * max(0, width - cell_width(value))
+
+        def spark(field, columns):
+            points = data.get('points', [])
+            if not points:
+                return '等待采样数据', 0
+            bins = [None] * max(1, columns)
+            start = data['now'] - periods[day_index] * 86400
+            for point in points:
+                index = min(len(bins) - 1, max(0, int((point['ts'] - start) / (periods[day_index] * 86400) * len(bins))))
+                bins[index] = (bins[index] or 0) + point[field]
+            peak = max([v for v in bins if v is not None] or [0])
+            blocks = '▁▂▃▄▅▆▇█'
+            return ''.join('·' if v is None else blocks[min(7, int(v / peak * 7))] if peak else blocks[0] for v in bins), peak
+
+        try:
+            while True:
+                if time.monotonic() >= next_refresh and not paused:
+                    try:
+                        data = provider(periods[day_index], query)
+                        error = ''
+                    except Exception as exc:
+                        error = str(exc)
+                    next_refresh = time.monotonic() + 5
+                ready = self.header('Dashboard / 仅本项目 · ' + ('已暂停刷新' if paused else '30 秒采样 · 5 秒刷新'))
+                height, width = self.screen.getmaxyx()
+                if ready:
+                    x = 3
+                    for index, title in enumerate(['1 概览', '2 热门域名', '3 连接历史']):
+                        caption = ' ' + title + ' '
+                        self.text(4, x, caption, self.selected if index == page else self.dim)
+                        x += cell_width(caption) + 2
+                    self.text(5, 3, '时段：最近 ' + labels[day_index] + '    ← → 切换', self.dim)
+                    if error:
+                        self.box(7, 3, min(7, height - 10), width - 6, '统计暂不可用', self.warning)
+                        self.text(9, 5, elide(error, width - 11), self.warning)
+                        if height >= 24:
+                            self.text(11, 5, '按 R 重试，Esc 返回；未启用时请先启用后台采集。', self.dim)
+                    elif data is not None:
+                        status = data.get('status', {})
+                        stale = not data.get('meta', {}).get('sample_at') or data['now'] - int(data['meta']['sample_at']) > 90
+                        notices = [v for k, v in status.items() if k in ('traffic', 'history') and v != '正常']
+                        if stale:
+                            notices.append('流量采样已过期或尚未开始')
+                        message = ' / '.join(notices) if notices else '采集正常 · 数据仅覆盖启用后的已采集时段'
+                        if data.get('demo'):
+                            message = '演示数据 · ' + message
+                        self.text(6, 3, elide(message, width - 7), self.warning if notices else self.good)
+                        if page == 0:
+                            card_width = (width - 8) // 2
+                            self.box(8, 3, 4, card_width, '下载 / 所选时段')
+                            self.box(8, 5 + card_width, 4, width - 8 - card_width, '上传 / 所选时段')
+                            self.text(10, 5, size(data['totals']['down']), self.good)
+                            self.text(10, 7 + card_width, size(data['totals']['up']), self.accent)
+                            self.text(12, 3, elide('连接记录 %s    近两分钟下载均速 %s/s' % (data['totals']['connections'], size(data['rates']['down'])), width - 7))
+                            chart_height = min(7, height - 17)
+                            self.box(14, 3, chart_height, width - 6, '历史趋势 · 点号表示无采样')
+                            for row, field, label, style in [(15, 'down', '下', self.good), (17, 'up', '上', self.accent)]:
+                                if row < 14 + chart_height - 1:
+                                    values, peak = spark(field, width - 14)
+                                    self.text(row, 5, label + ' ' + values, style)
+                                    if row + 1 < 14 + chart_height - 1:
+                                        self.text(row + 1, 7, '当前图列峰值 ' + size(peak), self.dim)
+                            if chart_height >= 6:
+                                self.text(19, 5, stamp(data['now'] - periods[day_index] * 86400) + ' → ' + stamp(data['now']), self.dim)
+                            row = 15 + chart_height
+                            if row + 1 < height - 3:
+                                self.text(row, 3, '3x-ui 当前累计计数（可由面板重置）', self.dim)
+                                for item in data.get('counters', []):
+                                    row += 1
+                                    if row >= height - 3:
+                                        break
+                                    self.text(row, 3, elide('%s  ↑ %s  ↓ %s' % (item['protocol'].upper(), size(item['up']), size(item['down'])), width - 7))
+                        elif page == 1:
+                            items = data.get('top', [])
+                            room = max(1, height - 15)
+                            offset = min(offset, max(0, len(items) - room))
+                            self.box(8, 3, height - 12, width - 6, '热门域名 · 连接次数（不是网页浏览次数）')
+                            if not items:
+                                self.text(10, 5, '尚无可识别的域名记录。', self.dim)
+                            largest = max([item['connections'] for item in items] or [1])
+                            for index, item in enumerate(items[offset:offset + room], offset):
+                                bar_width = 12 if width >= 90 else 0
+                                target_width = width - 23 - bar_width
+                                line = '%2d  ' % (index + 1) + padded(item['target'], target_width) + '%7d' % item['connections']
+                                if bar_width:
+                                    line += ' ' + '━' * max(1, round(item['connections'] / largest * bar_width))
+                                self.text(10 + index - offset, 5, line, self.good if index == 0 else 0)
+                            self.text(height - 3, 3, elide('仅 IP 的记录 %s 条 · %s 次采样中断 · ↑↓ 滚动' % (data['ip_only'], data.get('meta', {}).get('gaps', 0)), width - 7), self.dim)
+                        else:
+                            items = data.get('history', [])
+                            room = max(1, height - 14)
+                            offset = min(offset, max(0, len(items) - room))
+                            target_width = width - 35
+                            self.text(8, 3, padded('时间', 13) + padded('目标:端口', target_width) + ' 协议   结果', self.dim)
+                            for index, item in enumerate(items[offset:offset + room]):
+                                line = padded(stamp(item['ts']), 13) + padded(item['target'] + ':' + str(item['port']), target_width)
+                                line += ' ' + padded(item['protocol'].upper(), 6) + ' ' + ('接受' if item['outcome'] == 'accepted' else '拒绝')
+                                self.text(10 + index, 3, line, 0 if item['outcome'] == 'accepted' else self.warning)
+                            if not items:
+                                self.text(11, 3, '暂无符合条件的连接记录。', self.dim)
+                            self.text(height - 3, 3, elide('搜索：' + (query or '全部') + '  / 修改 · 显示最近 100 条 · P 暂停', width - 7), self.dim)
+                    hint = '1–3 页面  ←→ 时段  ↑↓ 滚动  / 搜索  R 刷新  P 暂停  Esc 返回'
+                    if width < 78:
+                        hint = '1–3页 ←→时段 ↑↓滚动 /搜索 R刷新 Esc返回'
+                    self.footer(hint)
+                key = self.key()
+                if key in ('q', 'Q', '\x1b', '\x03', '0'):
+                    return
+                if not ready:
+                    continue
+                if key in ('1', '2', '3'):
+                    page, offset = int(key) - 1, 0
+                elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                    day_index = (day_index + (1 if key == curses.KEY_RIGHT else -1)) % 3
+                    offset, next_refresh, paused = 0, 0, False
+                elif key in (curses.KEY_DOWN, 'j'):
+                    offset += 1
+                elif key in (curses.KEY_UP, 'k'):
+                    offset = max(0, offset - 1)
+                elif key in ('r', 'R'):
+                    next_refresh, paused = 0, False
+                elif key in ('p', 'P'):
+                    paused = not paused
+                    if not paused:
+                        next_refresh = 0
+                elif key == '/':
+                    self.screen.timeout(-1)
+                    try:
+                        query = self.ask('搜索连接历史', '目标域名或 IP；清空后回车显示全部', default=query, allow_empty=True) or ''
+                        page, offset, next_refresh, paused = 2, 0, 0, False
+                    except Cancelled:
+                        pass
+                    finally:
+                        self.screen.timeout(1000)
+        finally:
+            self.screen.timeout(-1)
 
     def ask(self, title, label, validator=lambda value: value, *, default='', hint='', allow_empty=False):
         value, cursor, error = str(default), len(str(default)), ''
