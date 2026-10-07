@@ -11,6 +11,7 @@ globalThis.crypto ??= webcrypto;
 globalThis.fetch = () => {throw new Error('Outbound network forbidden');};
 const token = 'A'.repeat(43);
 const uuid = '00000000-0000-4000-8000-000000000000';
+const egressUuid = '11111111-1111-4111-8111-111111111111';
 const config = {
   subscription_domain: 'sub.example.com', domain: 'node.example.com', uuid,
   token_sha256: createHash('sha256').update(token).digest('hex'),
@@ -20,6 +21,9 @@ const config = {
 const env = {SUB_CONFIG: JSON.stringify(config)};
 function get(path = `/s/${token}`, options, environment = env) {
   return worker.fetch(new Request(`https://sub.example.com${path}`, options), environment);
+}
+function splitEnv(extra = {}) {
+  return {SUB_CONFIG: JSON.stringify({...config, egress_profile: {uuid: egressUuid}, ...extra})};
 }
 
 test('unauthorized requests disclose no configuration', async () => {
@@ -356,4 +360,231 @@ test('full Clash config includes TUN, encrypted proxy DNS and restrictive traffi
   assert(c.dns.nameserver.every(s=>s.startsWith('https://')&&s.endsWith('#PROXY')));
   assert(c.dns['proxy-server-nameserver'].every(s=>s.startsWith('https://')&&s.endsWith('#DIRECT')));
   assert.deepEqual(c.rules,['IP-CIDR6,::/0,REJECT,no-resolve','NETWORK,udp,REJECT','MATCH,PROXY']);
+});
+
+test('complete split subscription pairs shared entry points with separate inbound credentials', async () => {
+  const response = await get(undefined, undefined, splitEnv());
+  assert.equal(response.status, 200);
+  const body = YAML.parse(await response.text());
+  assert.equal(body.proxies.length, 12);
+  assert.equal(new Set(body.proxies.map(proxy => proxy.name)).size, 12);
+  const socks = body.proxies.filter(proxy => proxy.name.startsWith('[后置 SOCKS5] '));
+  const direct = body.proxies.filter(proxy => proxy.name.startsWith('[无后置] '));
+  assert.equal(socks.length, 6);
+  assert.equal(direct.length, 6);
+  for (let i = 0; i < socks.length; i++) {
+    assert.equal(socks[i].password || socks[i].uuid, egressUuid);
+    assert.equal(direct[i].password || direct[i].uuid, uuid);
+    assert.equal(socks[i].type, direct[i].type);
+    assert.equal(socks[i].server, direct[i].server);
+    assert.equal(socks[i].port, direct[i].port);
+    assert.equal(socks[i].sni || socks[i].servername, config.domain);
+    assert.deepEqual(socks[i]['ws-opts'], direct[i]['ws-opts']);
+    assert.equal(socks[i]['skip-cert-verify'], false);
+  }
+  const legacy = YAML.parse(await (await get()).text());
+  for (const key of ['dns', 'tun', 'rules', 'ipv6']) assert.deepEqual(body[key], legacy[key]);
+});
+
+test('split Clash selectors default to SOCKS and automatic selection cannot cross egress categories', async () => {
+  const body = YAML.parse(await (await get(undefined, undefined, splitEnv())).text());
+  const groups = body['proxy-groups'];
+  const proxy = groups.find(group => group.name === 'PROXY');
+  assert.equal(proxy.type, 'select');
+  assert.deepEqual(proxy.proxies, ['后置 SOCKS5', '无后置']);
+  const automatic = groups.filter(group => group.type === 'url-test');
+  assert.equal(automatic.length, 2);
+  for (const [label, credential] of [['后置 SOCKS5', egressUuid], ['无后置', uuid]]) {
+    const selector = groups.find(group => group.name === label);
+    const auto = automatic.find(group => group.name === selector.proxies[0]);
+    assert.equal(selector.type, 'select');
+    assert(auto);
+    assert.equal(auto.proxies.length, 6);
+    assert.deepEqual(selector.proxies.slice(1), auto.proxies);
+    assert(auto.proxies.every(name => {
+      const node = body.proxies.find(node => node.name === name);
+      return (node?.password || node?.uuid) === credential;
+    }));
+    assert.equal(auto.url, 'https://www.gstatic.com/generate_204');
+  }
+  assert(!groups.some(group => group.type === 'fallback'));
+});
+
+test('filtered Clash subscriptions contain only the selected credential and matching group', async () => {
+  for (const [egress, label, credential, otherCredential] of [
+    ['direct', '无后置', uuid, egressUuid], ['socks', '后置 SOCKS5', egressUuid, uuid],
+  ]) {
+    const response = await get(`/s/${token}/Private-XUI.yaml?egress=${egress}`, undefined, splitEnv());
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert(!text.includes(otherCredential));
+    const body = YAML.parse(text);
+    assert.equal(body.proxies.length, 6);
+    assert(body.proxies.every(proxy => (proxy.password || proxy.uuid) === credential));
+    assert(body.proxies.every(proxy => proxy.name.startsWith(`[${label}] `)));
+    assert.deepEqual(body['proxy-groups'][0].proxies, [label]);
+    assert.deepEqual(body['proxy-groups'].find(group => group.type === 'url-test').proxies,
+      body.proxies.map(proxy => proxy.name));
+  }
+});
+
+test('single-node filtered groups keep the selected egress without an unnecessary latency selector', async () => {
+  for (const [egress, label] of [['socks', '后置 SOCKS5'], ['direct', '无后置']]) {
+    const response = await get(`/s/${token}?egress=${egress}&protocol=vless`, undefined, splitEnv({preferred: []}));
+    const body = YAML.parse(await response.text());
+    assert.equal(body.proxies.length, 1);
+    assert.deepEqual(body['proxy-groups'].map(group => group.type), ['select', 'select']);
+    assert.deepEqual(body['proxy-groups'][0].proxies, [label]);
+    assert.deepEqual(body['proxy-groups'][1].proxies, [body.proxies[0].name]);
+  }
+});
+
+test('raw and base64 egress filtering preserve labels, credentials and every protocol', async () => {
+  for (const protocol of ['vless', 'trojan', 'vmess']) {
+    for (const egress of ['all', 'direct', 'socks']) {
+      const query = `protocol=${protocol}&egress=${egress}`;
+      const raw = await (await get(`/s/${token}?format=raw&${query}`, undefined, splitEnv())).text();
+      const encoded = await (await get(`/s/${token}?format=base64&${query}`, undefined, splitEnv())).text();
+      assert.equal(Buffer.from(encoded, 'base64').toString(), raw);
+      const lines = raw.split('\n');
+      assert.equal(lines.length, egress === 'all' ? 4 : 2);
+      for (const [index, line] of lines.entries()) {
+        const socks = egress === 'socks' || (egress === 'all' && index < 2);
+        const label = socks ? '后置 SOCKS5' : '无后置';
+        const credential = socks ? egressUuid : uuid;
+        if (protocol === 'vmess') {
+          const node = JSON.parse(Buffer.from(line.slice(8), 'base64').toString());
+          assert.equal(node.id, credential);
+          assert(node.ps.startsWith(`[${label}] `));
+          assert.equal(node.host, config.domain);
+          assert.equal(node.sni, config.domain);
+          assert.equal(node.path, config.routes.find(route => route.protocol === protocol).path);
+        } else {
+          const node = new URL(line);
+          assert.equal(node.protocol, `${protocol}:`);
+          assert.equal(node.username, credential);
+          assert(decodeURIComponent(node.hash.slice(1)).startsWith(`[${label}] `));
+          assert.equal(node.searchParams.get('host'), config.domain);
+          assert.equal(node.searchParams.get('sni'), config.domain);
+          assert.equal(node.searchParams.get('path'), config.routes.find(route => route.protocol === protocol).path);
+        }
+      }
+    }
+  }
+});
+
+test('split subscriptions have distinct safe titles and filenames while existing paths still work', async () => {
+  const environment = splitEnv({subscription_name: '我的 VPN 订阅'});
+  for (const format of ['clash', 'raw', 'base64']) {
+    const extension = format === 'clash' ? 'yaml' : 'txt';
+    for (const [egress, label] of [['all', '全部出口'], ['direct', '无后置'], ['socks', '后置 SOCKS5']]) {
+      const path = `/s/${token}/Private-XUI.yaml?format=${format}&egress=${egress}`;
+      const response = await get(path, undefined, environment);
+      assert.equal(response.status, 200);
+      const title = `我的 VPN 订阅 · ${label}`;
+      const disposition = response.headers.get('Content-Disposition');
+      assert(disposition.includes(`filename="Private-XUI-${egress}.${extension}"`));
+      assert(disposition.includes(`filename*=UTF-8''${encodeURIComponent(`${title}.${extension}`)}`));
+      assert.equal(Buffer.from(response.headers.get('Profile-Title').slice(7), 'base64').toString(), title);
+      const head = await get(path, {method: 'HEAD'}, environment);
+      assert.equal(await head.text(), '');
+      assert.equal(head.headers.get('Content-Disposition'), disposition);
+      for (const [, value] of response.headers) {
+        assert(!value.includes(token));
+        assert(!value.includes(uuid));
+        assert(!value.includes(egressUuid));
+      }
+    }
+  }
+  const legacy = await get(undefined, undefined, environment);
+  const explicit = await get(`/s/${token}/Private-XUI.yaml?egress=all`, undefined, environment);
+  assert.equal(await legacy.text(), await explicit.text());
+  assert.equal(legacy.headers.get('Profile-Title'), explicit.headers.get('Profile-Title'));
+});
+
+test('legacy bindings keep old default output and can explicitly identify their direct subscription', async () => {
+  const legacy = await get();
+  const all = await get(`/s/${token}?egress=all`);
+  assert.equal(await legacy.text(), await all.text());
+  assert.equal(legacy.headers.get('Content-Disposition'), all.headers.get('Content-Disposition'));
+  const direct = await get(`/s/${token}?egress=direct`);
+  const body = YAML.parse(await direct.text());
+  assert.equal(body.proxies.length, 6);
+  assert(body.proxies.every(proxy => proxy.name.startsWith('[无后置] ')));
+  assert(body.proxies.every(proxy => (proxy.password || proxy.uuid) === uuid));
+  assert.deepEqual(body['proxy-groups'][0].proxies, ['无后置']);
+  assert.match(direct.headers.get('Content-Disposition'), /filename="Private-XUI-direct.yaml"/);
+});
+
+test('unconfigured SOCKS subscriptions fail closed before fetching public address lists', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async url => {calls.push(url); return new Response(publicData());});
+  for (const format of ['raw', 'base64', 'clash']) {
+    for (const method of ['GET', 'HEAD']) {
+      const response = await get(`/s/${token}?egress=socks&format=${format}`, {method}, autoEnv());
+      assert.equal(response.status, 404);
+      assert.equal(await response.text(), 'Subscription unavailable');
+      assert.equal(response.headers.get('Profile-Title'), null);
+      assert.equal(response.headers.get('Content-Disposition'), null);
+    }
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('egress query values and duplicate selectors are strictly allowlisted', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async url => {calls.push(url); return new Response(publicData());});
+  for (const query of ['egress=', 'egress=SOCKS', 'egress=socks5', 'egress=unknown',
+    'egress=socks&egress=direct', 'egress=all&egress=all', 'egress=socks&uuid=override']) {
+    const response = await get(`/s/${token}?${query}`, undefined, splitEnv({preferred_mode: 'auto'}));
+    assert.equal(response.status, 400);
+    assert(!(await response.text()).includes(uuid));
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('malformed and overlapping inbound UUIDs fail generically before any external request', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async url => {calls.push(url); return new Response(publicData());});
+  const invalidProfiles = [null, '', [], {}, {uuid: ''}, {uuid: null}, {uuid: 123},
+    {uuid: 'not-a-uuid'}, {uuid: egressUuid + '\n'}, {uuid: ` ${egressUuid}`}, {uuid},
+    {uuid: egressUuid, username: 'upstream-user', password: 'upstream-password'}];
+  for (const egress_profile of invalidProfiles) {
+    const response = await get(undefined, undefined, splitEnv({egress_profile, preferred_mode: 'auto'}));
+    assert.equal(response.status, 503);
+    assert.equal(await response.text(), 'Subscription unavailable');
+    assert.equal(response.headers.get('Profile-Title'), null);
+  }
+  for (const invalid of ['', null, undefined, 123, 'bad-uuid', uuid + ' ', uuid.replaceAll('-', '')]) {
+    const response = await get(undefined, undefined, splitEnv({uuid: invalid, preferred_mode: 'auto'}));
+    assert.equal(response.status, 503);
+    assert.equal(await response.text(), 'Subscription unavailable');
+  }
+  const mixedCase = '01234567-89ab-4cde-8123-456789abcdef';
+  const collision = await get(undefined, undefined, splitEnv({uuid: mixedCase,
+    egress_profile: {uuid: mixedCase.toUpperCase()}, preferred_mode: 'auto'}));
+  assert.equal(collision.status, 503);
+  assert.equal(await collision.text(), 'Subscription unavailable');
+  assert.equal(calls.length, 0);
+});
+
+test('split auto subscriptions fetch each public list once without either inbound UUID', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    calls.push({url, options});
+    return new Response(publicData(12, url));
+  });
+  const response = await get(`/s/${token}?protocol=vless`, {headers: {
+    Authorization: `Bearer ${token}`, Cookie: `${uuid}=${egressUuid}`,
+    Referer: `https://${config.domain}/${uuid}/${egressUuid}`,
+  }}, splitEnv({preferred_mode: 'auto'}));
+  assert.equal(response.status, 200);
+  const body = YAML.parse(await response.text());
+  assert.equal(body.proxies.length, 96);
+  assert.equal(body.proxies.filter(proxy => proxy.uuid === egressUuid).length, 48);
+  assert.equal(body.proxies.filter(proxy => proxy.uuid === uuid).length, 48);
+  assert.equal(calls.length, 3);
+  const sent = JSON.stringify(calls);
+  for (const secret of [uuid, egressUuid, token, config.domain, config.subscription_domain,
+    ...config.routes.map(route => route.path)]) assert(!sent.includes(secret));
 });

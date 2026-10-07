@@ -149,13 +149,17 @@ def panel_for(backend=None):
 
 
 def worker_config(state, token=None):
-    return {
+    config = {
         'subscription_domain': state['subscription_domain'], 'domain': state['domain'],
         'uuid': state['uuid'], 'routes': state['routes'], 'preferred': state['preferred'],
         'preferred_mode': state.get('preferred_mode', 'custom' if state.get('preferred') else 'direct'),
         'subscription_name': state.get('subscription_name', 'Private XUI'),
         'token_sha256': hashlib.sha256((token or state['subscription_token']).encode()).hexdigest(),
     }
+    # This is the node credential for a distinct inbound client, not SOCKS auth.
+    if state.get('egress'):
+        config['egress_profile'] = {'uuid': state['egress']['client_uuid']}
+    return config
 
 
 def worker_source():
@@ -172,8 +176,11 @@ def upload(cf, state, token=None):
             {'enabled': False, 'previews_enabled': False})
 
 
-def subscription_url(state):
-    return f'https://{state["subscription_domain"]}/s/{state["subscription_token"]}/Private-XUI.yaml'
+def subscription_url(state, egress='all'):
+    if egress not in ('all', 'direct', 'socks'):
+        raise ValueError('未知的订阅出口类型')
+    base = f'https://{state["subscription_domain"]}/s/{state["subscription_token"]}/Private-XUI.yaml'
+    return base + ('?egress=' + egress if egress != 'all' else '')
 
 
 def print_links(state):
@@ -183,11 +190,18 @@ def print_links(state):
         print('部署未完成或更新待恢复，请先按 README 处理；以下配置可能尚未生效。')
     print(f'订阅名称: {state.get("subscription_name", "Private XUI")}')
     print(f'Clash/Mihomo 订阅: {base}')
+    if state.get('egress'):
+        print('完整订阅包含 [无后置] 与 [后置 SOCKS5]，默认选择后置组。')
+        print('仅无后置: ' + subscription_url(state, 'direct'))
+        print('仅后置 SOCKS5: ' + subscription_url(state, 'socks'))
+    if state.get('egress_subscription_pending'):
+        print('出口订阅尚未同步，请在后置出口中重试发布。')
     if state.get('preferred_mode') == 'auto':
         print('自动优选：公开域名池与动态 IP 池，数量以客户端更新后的订阅为准。')
     else:
         count = len({state['domain']} | {item['address'] for item in state.get('preferred', [])})
-        print(f'本地配置：{len(state["routes"])} 个协议 × {count} 个入口 = {len(state["routes"]) * count} 条连接配置。')
+        variants = 2 if state.get('egress') else 1
+        print(f'本地配置：{len(state["routes"])} 个协议 × {count} 个入口 × {variants} 种出口 = {len(state["routes"]) * count * variants} 条连接配置。')
     connectivity.print_report(state)
 
 
@@ -414,6 +428,11 @@ def cleanup(cf, state, path, panel=None):
             # A previous delete may have committed before service restart failed.
             if state['backend'] == 'db':
                 xui.restart_xui_service()
+        # Never remove the egress rule while a project inbound may still accept
+        # connections: that would restore the original/default route too early.
+        if state.get('egress') or state.get('egress_pending'):
+            import egress
+            egress.remove_after_inbounds(state, path)
     attempt('3x-ui 入站', remove_inbounds)
     if failures:
         state['status'] = 'cleanup-needed'
@@ -428,6 +447,8 @@ def update_worker(cf, state, path, *, rotate=False, preferred=None, preferred_mo
                   subscription_name=None, quiet_links=False):
     if state['status'] not in ('ready', 'update-pending'):
         raise ValueError('部署未完成，不能更新 Worker；请先清理失败部署')
+    if state.get('egress_pending'):
+        raise ValueError('后置身份与路由尚未确认，请先在后置出口重试应用，再发布订阅')
     if state['status'] == 'update-pending':
         # Retrying an ambiguous upload reuses the exact pending token/config.
         token = state['pending_token']
@@ -448,6 +469,7 @@ def update_worker(cf, state, path, *, rotate=False, preferred=None, preferred_mo
     with progress.step('保存更新结果'):
         state['subscription_token'] = token
         state.pop('pending_token', None)
+        state.pop('egress_subscription_pending', None)
         state['status'] = 'ready'
         save(path, state)
     if quiet_links:
@@ -481,6 +503,10 @@ def parser():
     check.add_argument('--local-only', action='store_true', help='只检查本机环境，不查询公网 IP')
     check.add_argument('--quiet', action='store_true', help='检查通过时不输出')
     commands.add_parser('panel', help='查看本工具保存的面板访问信息')
+    egress_parser = commands.add_parser('egress', help='本项目节点的后置 SOCKS5 出口')
+    egress_parser.add_argument('action', choices=['configure', 'status', 'check', 'disable', 'retry'], nargs='?', default='status')
+    egress_parser.add_argument('--config', help='权限 600 的 SOCKS5 JSON 文件；省略则交互输入')
+    egress_parser.add_argument('--yes', action='store_true', help='确认配置 / 禁用 / 重试，可能短暂中断节点连接')
     dashboard_parser = commands.add_parser('dashboard', help='终端流量与连接历史 Dashboard')
     dashboard_parser.add_argument('action', choices=['open', 'install', 'status', 'collect', 'uninstall'], nargs='?', default='open')
     dashboard_parser.add_argument('--retention-days', type=int, default=30, help='首次安装历史保留天数（1–30）')
@@ -500,6 +526,9 @@ def run_command(args):
     if not hasattr(os, 'geteuid') or os.geteuid() != 0:
         raise ValueError('请在目标 VPS 上使用 sudo 运行修改命令')
     with lock(args.state):
+        if args.command == 'egress':
+            import egress
+            return egress.command(args)
         if args.command == 'check-connectivity':
             return check_connectivity(load(args.state), args.state)
         with cf_session() as cf:

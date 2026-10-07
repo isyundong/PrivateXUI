@@ -31,6 +31,8 @@ private-xui dashboard
 | / | 按目标域名或 IP 搜索历史；清空后显示全部 |
 | R | 立即刷新显示 |
 | P | 暂停 / 恢复显示刷新 |
+| C | 查看节点当前累计计数，窄屏同样可用 |
+| ? | 查看指标口径与键盘说明 |
 | Esc / Q | 返回；后台采集继续运行 |
 
 终端最小 52 列 × 20 行；建议 100 列 × 30 行以上。宽终端显示更多图表和节点计数。
@@ -45,6 +47,8 @@ private-xui dashboard
 - **历史**：时间、目标域名/IP、端口、协议、接受/拒绝结果；只显示最近 100 条匹配记录。时间使用服务器本地时区。
 
 没有访问日志或只看到 IP 时，不会猜测网站名称。HTTPS 内容、完整 URL、搜索词均不采集。多设备共用节点凭据时合并统计，不冒充设备级统计。
+
+后置与无后置身份共用项目入站，Dashboard 仍按入站合并统计，不将订阅分组误称为分别计量的流量。
 
 ## 日志与保留
 
@@ -78,6 +82,6 @@ private-xui dashboard uninstall    # 停止并卸载采集，保留历史
 
 以下是当前 curses 程序的实际终端输出，使用演示数据，不是 VPS 实测记录。
 
-![终端流量概览](images/tui-dashboard-overview.jpg)
+![终端流量概览](images/tui-dashboard-120x36-new.png)
 
-![终端热门域名](images/tui-dashboard-domains.jpg)
+![最小终端流量概览](images/tui-dashboard-52x20-new.png)

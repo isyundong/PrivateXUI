@@ -29,19 +29,36 @@ class Screen:
         self.keys = iter(keys)
         self.dimensions = dimensions
         self.writes = []
+        self.frames = []
+        self.moves = []
+        self.grid = [[' '] * dimensions[1] for _ in range(dimensions[0])]
 
     def keypad(self, value): pass
     def timeout(self, value): pass
-    def erase(self): pass
+    def erase(self):
+        self.grid = [[' '] * self.dimensions[1] for _ in range(self.dimensions[0])]
     def clear(self): pass
     def refresh(self): pass
-    def move(self, y, x): pass
+    def move(self, y, x):
+        self.moves.append((y, x))
     def getmaxyx(self): return self.dimensions
-    def get_wch(self): return next(self.keys)
+    def get_wch(self):
+        self.frames.append(tuple(''.join(row) for row in self.grid))
+        return next(self.keys)
     def addstr(self, y, x, value, style=0):
-        if x + tui.cell_width(value) >= self.dimensions[1]:
+        if not 0 <= y < self.dimensions[0] or x + tui.cell_width(value) >= self.dimensions[1]:
             raise AssertionError('Text overflows terminal columns')
         self.writes.append((y, x, value, style))
+        for char in value:
+            columns = tui.cell_width(char)
+            if not columns:
+                if x:
+                    self.grid[y][x - 1] += char
+                continue
+            self.grid[y][x] = char
+            for continuation in range(1, columns):
+                self.grid[y][x + continuation] = ''
+            x += columns
 
 
 class TerminalTests(unittest.TestCase):
@@ -80,7 +97,7 @@ class TerminalTests(unittest.TestCase):
         self.assertIsNone(ui.choose('菜单', [('one', '操作', '')]))
         self.assertTrue(any('终端太小' in row[2] for row in screen.writes))
 
-    def test_home_has_bordered_cards_and_high_contrast_focus_at_multiple_sizes(self):
+    def test_home_retains_status_actions_and_visible_focus_at_multiple_sizes(self):
         model = {'server': {'title': '服务器 / 3x-ui', 'badge': ('已安装 · 运行中', 'good'),
                             'rows': [('系统', 'Ubuntu 22.04 LTS', ''), ('IPv4', '1.1.1.1', ''), ('回源', '17001 / 17002 / 17003', '')]},
                  'deployment': {'title': '节点 / 订阅', 'badge': ('已部署 · 本机记录', 'good'),
@@ -89,15 +106,34 @@ class TerminalTests(unittest.TestCase):
                             'lines': ['当前仅域名入口。', '按 A 打开自动优选设置']},
                  'focus': 'maintenance', 'shortcut': 'auto-settings'}
         actions = [('install', '部署', ''), ('subscription', '订阅', ''), ('maintenance', '维护', ''), ('exit', '退出', '')]
-        for dimensions in ((20, 52), (24, 80), (32, 120)):
+        for dimensions in ((20, 52), (24, 80), (36, 120)):
             with self.subTest(dimensions=dimensions):
                 ui, screen = self.ui(['q'], dimensions)
                 ui.home(model, actions)
                 text = '\n'.join(row[2] for row in screen.writes)
-                self.assertIn('PrivateXUI', text)
-                self.assertGreaterEqual(text.count('╭'), 7)
+                self.assertIn('Private XUI', text)
+                if dimensions[1] >= 80:
+                    self.assertIn('┌', text)
+                self.assertIn('node.example.com', text)
+                self.assertIn('sub.example.com', text)
                 self.assertIn('尚未启用自动优选', text)
                 self.assertTrue(any('3 维护' in row[2] and row[3] == ui.selected for row in screen.writes))
+                self.assertIn('─', screen.frames[-1][dimensions[0] - 3])
+
+    def test_home_exposes_egress_summary_without_credentials(self):
+        for dimensions in ((20, 52), (24, 80), (36, 120)):
+            for summary in ('SOCKS5 relay.example.net:1080', '本机直出', '待恢复'):
+                with self.subTest(dimensions=dimensions, summary=summary):
+                    ui, screen = self.ui(['q'], dimensions)
+                    model = {'server': {'title': '服务器', 'badge': ('正常', 'good'), 'rows': []},
+                             'deployment': {'title': '订阅', 'badge': ('已部署', 'good'), 'rows': []},
+                             'notice': {'title': '已配置', 'tone': 'muted', 'lines': []},
+                             'egress': {'summary': summary, 'tone': 'warning', 'password': 'do-not-render-password'}}
+                    ui.home(model, [('install', '部署', ''), ('subscription', '订阅', ''), ('maintenance', '维护', ''), ('exit', '退出', '')])
+                    text = '\n'.join(row[2] for row in screen.writes)
+                    self.assertIn('后置出口', text)
+                    self.assertIn(summary, text)
+                    self.assertNotIn('do-not-render-password', text)
 
     def test_auto_shortcut_opens_settings_and_never_deploys(self):
         ui, _ = self.ui(['a'])
@@ -119,9 +155,75 @@ class TerminalTests(unittest.TestCase):
         with self.assertRaises(tui.Cancelled): ui.ask('输入', '名称')
         self.assertIsNone(ui.ask('输入', '名称', allow_empty=True))
 
+    def test_secret_input_masks_value_preserves_spaces_and_accepts_question_marks(self):
+        password = ' Pa?ss中 '
+        ui, screen = self.ui(['\n'], (20, 52))
+        self.assertEqual(ui.ask('出口', 'SOCKS5 密码', default=password, secret=True), password)
+        rendered = '\n'.join(row[2] for row in screen.writes)
+        self.assertNotIn(password, rendered)
+        self.assertNotIn('Pa?ss', rendered)
+        self.assertIn('*' * len(password), rendered)
+        ui, _ = self.ui(['?', '\n'])
+        self.assertEqual(ui.ask('输入', '名称'), '?')
+
+    def test_secret_validator_error_cannot_echo_password(self):
+        password = 'a-secret-that-must-stay-private'
+        ui, screen = self.ui(['\n', '\x1b'])
+        def reject(value):
+            raise ValueError('Rejected password: ' + value)
+        with self.assertRaises(tui.Cancelled):
+            ui.ask('出口', '密码', reject, default=password, secret=True)
+        rendered = '\n'.join(row[2] for row in screen.writes)
+        self.assertNotIn(password, rendered)
+        self.assertIn('输入无效', rendered)
+
+    def test_long_cjk_input_keeps_cursor_inside_the_field(self):
+        original = '节点' * 100
+        ui, screen = self.ui([tui.curses.KEY_LEFT, '新', '\n'], (20, 52))
+        self.assertEqual(ui.ask('输入', '名称', default=original), original[:-1] + '新' + original[-1])
+        self.assertTrue(all(0 <= row < 20 and 4 <= column < 48 for row, column in screen.moves))
+
+    def test_username_can_preserve_authentication_whitespace(self):
+        ui, _ = self.ui(['\n'])
+        self.assertEqual(ui.ask('后置出口', '用户名', default=' user ', preserve_whitespace=True), ' user ')
+
     def test_destructive_confirmation_defaults_to_cancel(self):
         ui, _ = self.ui(['\n'])
         self.assertFalse(ui.confirm('清理', ['确认删除本项目'], destructive=True))
+
+    def test_long_confirmation_can_be_read_without_moving_the_safe_default(self):
+        summary = ['节点：' + 'long-name.' * 20 + 'example.com', '保留面板与其他节点。', '完整影响末尾：统计历史保留。']
+        for dimensions in ((20, 52), (24, 80), (36, 120)):
+            with self.subTest(dimensions=dimensions):
+                ui, screen = self.ui([tui.curses.KEY_DOWN] * 30 + ['\n'], dimensions)
+                self.assertFalse(ui.confirm('卸载本项目', summary, destructive=True))
+                rendered = '\n'.join(row[2] for row in screen.writes)
+                self.assertIn('完整影响末尾', rendered)
+                self.assertIn('返回', screen.frames[-1][dimensions[0] - 5])
+                self.assertIn('确认并继续', screen.frames[-1][dimensions[0] - 5])
+                self.assertIn('─', screen.frames[-1][dimensions[0] - 3])
+        ui, _ = self.ui([tui.curses.KEY_RIGHT, '\n'])
+        self.assertTrue(ui.confirm('卸载', summary, destructive=True))
+
+    def test_no_color_skips_palette_and_keeps_a_visible_selection(self):
+        with patch.dict(os.environ, {'NO_COLOR': '1'}), patch.object(tui.curses, 'has_colors', return_value=True), \
+             patch.object(tui.curses, 'start_color') as start, patch.object(tui.curses, 'init_pair') as pairs:
+            ui, screen = self.ui(['\n'])
+            self.assertEqual(ui.choose('菜单', [('one', '操作', '')]), 'one')
+            start.assert_not_called()
+            pairs.assert_not_called()
+            self.assertTrue(any('操作' in row[2] and row[3] & tui.curses.A_REVERSE for row in screen.writes))
+
+    def test_low_color_fallback_uses_only_available_palette_entries(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(tui.curses, 'has_colors', return_value=True), \
+             patch.object(tui.curses, 'COLORS', 8, create=True), patch.object(tui.curses, 'start_color'), \
+             patch.object(tui.curses, 'init_pair') as pairs, patch.object(tui.curses, 'init_color') as redefine, \
+             patch.object(tui.curses, 'color_pair', side_effect=lambda value: value << 8):
+            ui, _ = self.ui(['\n'])
+            self.assertEqual(ui.choose('菜单', [('one', '操作', '')]), 'one')
+            self.assertTrue(pairs.called)
+            self.assertTrue(all(0 <= args[1] < 8 and 0 <= args[2] < 8 for args, _ in pairs.call_args_list))
+            redefine.assert_not_called()
 
     def test_console_restores_terminal_after_failure(self):
         ui, _ = self.ui([])
@@ -289,6 +391,63 @@ if __name__ == '__main__':
     unittest.main()
 
 class TelemetryTUITests(unittest.TestCase):
+    @staticmethod
+    def snapshot():
+        now = 1700000000
+        return {'now': now, 'totals': {'up': 1024, 'down': 2048, 'connections': 12}, 'rates': {'down': 120},
+                'points': [{'ts': now - 60, 'up': 512, 'down': 1024}],
+                'top': [{'target': 'github.example.com', 'connections': 12}],
+                'history': [{'ts': now, 'target': 'github.example.com', 'port': 443, 'protocol': 'vless', 'outcome': 'accepted'}],
+                'meta': {'sample_at': str(now), 'gaps': '0'}, 'status': {'traffic': '正常', 'history': '正常'}, 'ip_only': 0,
+                'counters': [{'protocol': 'vless', 'up': 65536, 'down': 131072}]}
+
+    def test_both_trends_and_average_rate_remain_visible_at_minimum_size(self):
+        for dimensions in ((20, 52), (24, 80), (36, 120)):
+            with self.subTest(dimensions=dimensions), patch.object(tui.curses, 'has_colors', return_value=False), patch.object(tui.curses, 'curs_set'):
+                screen = Screen(['q'], dimensions)
+                tui.TerminalUI(screen).dashboard(lambda *_: self.snapshot())
+                visible = '\n'.join(screen.frames[-1])
+                self.assertIn('近两分钟下载均速', visible)
+                self.assertIn('120 B/s', visible)
+                self.assertEqual(sum(any(char in row for char in '▁▂▃▄▅▆▇█') for row in screen.frames[-1]), 2)
+                self.assertIn('─', screen.frames[-1][dimensions[0] - 3])
+
+    def test_search_passes_the_real_query_and_counter_details_return_to_dashboard(self):
+        calls = []
+        def provider(days, query):
+            calls.append((days, query))
+            return self.snapshot()
+        with patch.object(tui.curses, 'has_colors', return_value=False), patch.object(tui.curses, 'curs_set'):
+            screen = Screen(['/', 'g', 'i', 't', '\n', 'c', '\x1b', 'q'], (20, 52))
+            tui.TerminalUI(screen).dashboard(provider)
+        self.assertIn((1, 'git'), calls)
+        text = '\n'.join(row[2] for row in screen.writes)
+        self.assertIn('64.0 KiB', text)
+        self.assertIn('可由面板重置', text)
+        self.assertIn('搜索 / git', '\n'.join(screen.frames[-1]))
+
+    def test_pause_stops_display_queries_and_resume_refreshes(self):
+        import itertools
+        provider = Mock(side_effect=lambda *_: self.snapshot())
+        with patch.object(tui.curses, 'has_colors', return_value=False), patch.object(tui.curses, 'curs_set'), \
+             patch('time.monotonic', side_effect=itertools.count(0, 10)):
+            screen = Screen(['p', None, 'p', 'q'])
+            tui.TerminalUI(screen).dashboard(provider)
+        self.assertEqual(provider.call_count, 2)
+        self.assertTrue(any('已暂停刷新' in row[2] for row in screen.writes))
+
+    def test_waiting_for_first_sample_does_not_claim_zero_traffic(self):
+        data = self.snapshot()
+        data.update(meta={}, points=[], counters=[], totals={'up': 0, 'down': 0, 'connections': 0},
+                    status={'traffic': '等待首次采样', 'history': '尚未配置访问日志'})
+        with patch.object(tui.curses, 'has_colors', return_value=False), patch.object(tui.curses, 'curs_set'):
+            screen = Screen(['q'], (36, 120))
+            tui.TerminalUI(screen).dashboard(lambda *_: data)
+        text = '\n'.join(screen.frames[-1])
+        self.assertIn('等待首次采样', text)
+        self.assertIn('—', text)
+        self.assertNotIn('0 B', text)
+
     def test_pages_period_switch_refresh_and_narrow_layouts(self):
         import time
         now=int(time.time());calls=[]

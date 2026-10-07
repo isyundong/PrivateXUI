@@ -1,0 +1,32 @@
+{
+  "source_url": "https://ui.shadcn.com/create?preset=b1Q5GC&item=preview&template=vite",
+  "captured_at": "2026-10-07",
+  "preset": "b1Q5GC",
+  "config": {
+    "menuColor": "default",
+    "menuAccent": "subtle",
+    "radius": "none",
+    "font": "ibm-plex-sans",
+    "iconLibrary": "lucide",
+    "theme": "blue",
+    "baseColor": "neutral",
+    "style": "nova",
+    "chartColor": "neutral",
+    "fontHeading": "inherit"
+  },
+  "dark_css_variables": {
+    "background": "oklch(0.145 0 0)",
+    "foreground": "oklch(0.985 0 0)",
+    "primary": "oklch(0.424 0.199 265.638)",
+    "primary-foreground": "oklch(0.97 0.014 254.604)",
+    "muted": "oklch(0.269 0 0)",
+    "muted-foreground": "oklch(0.708 0 0)",
+    "accent": "oklch(0.269 0 0)",
+    "border": "oklch(1 0 0 / 10%)",
+    "ring": "oklch(0.556 0 0)",
+    "radius": "0",
+    "chart-1": "oklch(0.87 0 0)",
+    "chart-2": "oklch(0.556 0 0)"
+  },
+  "translation": "Same visual hierarchy and palette adapted to a keyboard terminal; terminal fonts and 256-color approximations apply."
+}
