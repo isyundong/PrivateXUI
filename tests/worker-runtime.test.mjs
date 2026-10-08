@@ -51,6 +51,7 @@ test('actual workerd separates SOCKS and direct profiles without sharing either 
   for (const group of body['proxy-groups'].filter(group => group.type === 'url-test')) {
     const credentials = group.proxies.map(name => body.proxies.find(proxy => proxy.name === name).uuid);
     assert.equal(new Set(credentials).size, 1);
+    assert.equal(body.proxies.find(proxy => proxy.name === group.proxies[0]).server, '104.17.1.1');
   }
   for (const [egress, expected, forbidden] of [['socks', egressUuid, uuid], ['direct', uuid, egressUuid]]) {
     const filtered = await mf.dispatchFetch(`${url}?egress=${egress}&format=raw`);

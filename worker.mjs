@@ -273,13 +273,19 @@ function clash(list, categorized) {
     network: 'ws', 'ws-opts': {path: node.path, headers: {Host: node.host}},
   }));
   const names = proxies.map(node => node.name);
+  const ipv4Names = new Set(list.filter(node => ipv4Number(node.server) !== null).map(node => node.name));
   const groups = [{name: 'PROXY', type: 'select', proxies: []}];
   function addSelection(name, choices, automaticName) {
     const group = name === 'PROXY' ? groups[0] : {name, type: 'select', proxies: []};
     group.proxies = choices.length > 1 ? [automaticName, ...choices] : choices;
     if (name !== 'PROXY') groups.push(group);
     if (choices.length > 1) groups.push({
-      name: automaticName, type: 'url-test', proxies: choices,
+      name: automaticName, type: 'url-test',
+      // Until health checks finish the first member is used. Prefer existing
+      // IPv4 entries so initial proxy DNS does not need a node DNS lookup first.
+      // This only orders candidates; reachability is still measured by the client.
+      proxies: [...choices.filter(choice => ipv4Names.has(choice)),
+        ...choices.filter(choice => !ipv4Names.has(choice))],
       // Measured by the client over the complete proxy path. This is a latency
       // and reachability check, not a bandwidth benchmark or a server-side claim.
       url: 'https://www.gstatic.com/generate_204', interval: 300, tolerance: 50,
@@ -309,7 +315,8 @@ function clash(list, categorized) {
       enable: true, stack: 'gvisor', 'auto-route': true, 'strict-route': true,
       'auto-detect-interface': true, 'dns-hijack': ['any:53', 'tcp://any:53'],
       'inet6-address': ['fdfe:dcba:9876::1/126'],
-      'route-address': ['0.0.0.0/0', '::/0'],
+      // Use the core's platform-specific auto-route ranges. Explicit /0 routes
+      // bypass macOS's split routes and can interfere with interface detection.
     },
     dns: {
       enable: true, listen: '127.0.0.1:1053', ipv6: false,

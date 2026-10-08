@@ -6,6 +6,8 @@
 
 顶层 `ipv6: true` 是为了允许 TUN 建立 IPv6 路由并捕获流量；DNS 的 `ipv6: false` 不返回 AAAA，`IP-CIDR6,::/0,REJECT,no-resolve` 阻止捕获的 IPv6 出站。只写顶层 `ipv6: false` 并不等于关闭操作系统的 IPv6。
 
+TUN 路由范围由 Mihomo 的 `auto-route` 按操作系统生成，订阅不强制写入 `route-address: [0.0.0.0/0, ::/0]`。macOS 核心默认使用更具体的分段路由，保留系统默认接口检测所需的物理默认路由；仍应在实际设备核实捕获范围。若 GUI 把顶层 IPv6 关闭，也需重新核对 IPv6 捕获能力。
+
 ## Clash Verge Rev
 
 1. 更新自己的 Worker，再刷新并重新激活**完整订阅配置**。仅更新代理集合中的节点，不会更新顶层 TUN/DNS/rules。

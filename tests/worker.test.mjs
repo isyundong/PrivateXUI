@@ -154,7 +154,10 @@ test('six candidate entries produce 21 usable definitions and client-side latenc
   const body = YAML.parse(await response.text());
   assert.equal(body.proxies.length, 21);
   const automatic = body['proxy-groups'].find(group => group.type === 'url-test');
-  assert.deepEqual(automatic.proxies, body.proxies.map(proxy => proxy.name));
+  assert.deepEqual(automatic.proxies, [
+    ...body.proxies.filter(proxy => proxy.server !== config.domain),
+    ...body.proxies.filter(proxy => proxy.server === config.domain),
+  ].map(proxy => proxy.name));
   assert.equal(automatic.url, 'https://www.gstatic.com/generate_204');
   for (const protocol of ['vless', 'trojan', 'vmess']) {
     const entries = body.proxies.filter(proxy => proxy.type === protocol);
@@ -355,7 +358,9 @@ test('one unavailable carrier does not remove other carrier lists', async t => {
 
 test('full Clash config includes TUN, encrypted proxy DNS and restrictive traffic rules',async()=>{
   const c=YAML.parse(await(await get()).text());assert.equal(c.tun.enable,true);assert.equal(c.tun['strict-route'],true);
-  assert.deepEqual(c.tun['dns-hijack'],['any:53','tcp://any:53']);assert(c.tun['route-address'].includes('::/0'));
+  assert.deepEqual(c.tun['dns-hijack'],['any:53','tcp://any:53']);
+  assert.equal(c.tun['auto-route'],true);assert.equal(c.tun['auto-detect-interface'],true);
+  assert(!Object.hasOwn(c.tun,'route-address'));assert(c.tun['inet6-address'].length>0);
   assert.equal(c.ipv6,true);assert.equal(c.dns.ipv6,false);assert.equal(c.dns['enhanced-mode'],'fake-ip');
   assert(c.dns.nameserver.every(s=>s.startsWith('https://')&&s.endsWith('#PROXY')));
   assert(c.dns['proxy-server-nameserver'].every(s=>s.startsWith('https://')&&s.endsWith('#DIRECT')));
@@ -420,6 +425,34 @@ test('global mode follows the selected egress instead of an implicit DIRECT defa
       if (egress === 'socks') {
         assert.deepEqual(body['proxy-groups'].find(group => group.name === 'PROXY').proxies, ['后置 SOCKS5']);
       }
+    }
+  }
+});
+
+test('automatic groups start with existing IPv4 entries without changing membership or manual order', async () => {
+  for (const preferred of [
+    [{address: 'ipv4.example.test', name: 'domain'}, {address: '2001:db8::1', name: 'IPv6'},
+      {address: '104.17.1.1', name: 'IPv4 first'}, {address: '104.17.1.2', name: 'IPv4 second'}],
+    config.preferred, [],
+  ]) {
+    for (const categorized of [false, true]) {
+      const environment = categorized ? splitEnv({preferred}) : {SUB_CONFIG: JSON.stringify({...config, preferred})};
+      const body = YAML.parse(await (await get(undefined, undefined, environment)).text());
+      const nodes = new Map(body.proxies.map(node => [node.name, node]));
+      for (const automatic of body['proxy-groups'].filter(group => group.type === 'url-test')) {
+        const manual = body['proxy-groups'].find(group => group.type === 'select' && group.proxies[0] === automatic.name);
+        const order = manual.proxies.slice(1);
+        const isV4 = name => /^\d+\.\d+\.\d+\.\d+$/.test(nodes.get(name).server);
+        assert.deepEqual(automatic.proxies, [...order.filter(isV4), ...order.filter(name => !isV4(name))]);
+        assert.deepEqual(new Set(automatic.proxies), new Set(order));
+        assert.equal(new Set(automatic.proxies.map(name => nodes.get(name).password || nodes.get(name).uuid)).size, 1);
+        assert.equal(nodes.get(order[0]).server, config.domain);
+        assert.deepEqual(order, body.proxies.filter(node => automatic.proxies.includes(node.name)).map(node => node.name));
+      }
+      // Raw export and displayed node definitions retain the original ordering.
+      const raw = (await (await get(`/s/${token}?format=raw`, undefined, environment)).text()).split('\n');
+      assert.equal(new URL(raw[0]).hostname, config.domain);
+      assert.equal(body.proxies[0].server, config.domain);
     }
   }
 });

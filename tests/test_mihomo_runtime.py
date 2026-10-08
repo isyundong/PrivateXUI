@@ -1,4 +1,4 @@
-"""Optional real-core regression for generated GLOBAL routing, loopback only.
+"""Optional real-core regressions for generated subscription routing, loopback only.
 
 PRIVATE_XUI_MIHOMO=/path/to/mihomo python3 -m unittest discover -s tests -p test_mihomo_runtime.py -v
 Without PRIVATE_XUI_MIHOMO the normal suite skips this check. Node and the
@@ -31,7 +31,8 @@ const config = {
   uuid: '00000000-0000-4000-8000-000000000000',
   egress_profile: {uuid: '11111111-1111-4111-8111-111111111111'},
   token_sha256: createHash('sha256').update(token).digest('hex'),
-  routes: [{protocol: 'vless', path: '/fixture'}], preferred: [],
+  routes: [{protocol: 'vless', path: '/fixture'}],
+  preferred: JSON.parse(process.argv[1] || '[]'),
 };
 const response = await worker.fetch(
   new Request(`https://sub.example.test/s/${token}?egress=all`),
@@ -230,6 +231,44 @@ class RealMihomoTests(unittest.TestCase):
         self.stop_core()
         self.start_core(self.generated)
         self.assert_post_route()
+
+    def test_generated_automatic_group_starts_with_ipv4_before_health_checks(self):
+        preferred = [{'address': '104.16.0.1', 'name': 'IPv4 fixture'}]
+        rendered = subprocess.run(['node', '--input-type=module', '-e', RENDER,
+                                   json.dumps(preferred)], cwd=ROOT,
+                                  capture_output=True, text=True, check=True, timeout=10)
+        config = json.loads(rendered.stdout)
+        for key in ('mode', 'mixed-port', 'external-controller', 'log-level', 'tun', 'dns', 'profile'):
+            config[key] = copy.deepcopy(self.generated[key])
+        # Reserve a port without listening, so domain entries consistently fail
+        # locally and cannot be helped by DNS or another process claiming it.
+        with socket.socket() as unavailable:
+            unavailable.bind(('127.0.0.1', 0))
+            unavailable_port = unavailable.getsockname()[1]
+            post_ip = None
+            for node in config['proxies']:
+                is_ip = node['server'] == preferred[0]['address']
+                is_post = node['name'].startswith('[后置 SOCKS5] ')
+                if is_ip and is_post:
+                    post_ip = node['name']
+                port = (self.post if is_post else self.base).server_address[1] if is_ip else unavailable_port
+                name = node['name']
+                node.clear()
+                node.update({'name': name, 'type': 'socks5', 'server': '127.0.0.1', 'port': port})
+            self.assertIsNotNone(post_ip)
+            for group in config['proxy-groups']:
+                if group['type'] == 'url-test':
+                    # Empty URLs/zero intervals get parser defaults. A whitespace
+                    # URL survives parsing but health checks trim it and skip I/O.
+                    group['url'], group['interval'] = ' ', 0
+            self.start_core(config)
+            _, response = self.api('/proxies')
+            proxies = response['proxies']
+            self.assertEqual(proxies['自动选择 · 后置 SOCKS5']['now'], post_ip)
+            for node in config['proxies']:
+                self.assertEqual(proxies[node['name']]['history'], [])
+                self.assertEqual(proxies[node['name']]['extra'], {})
+            self.assert_post_route()
 
 
 if __name__ == '__main__':
