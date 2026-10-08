@@ -67,3 +67,5 @@ PRIVATE_XUI_MIHOMO=/你已核验的/mihomo python3 -m unittest discover -s tests
 该测试需本地 Node.js 与已安装的开发依赖；未设置 `PRIVATE_XUI_MIHOMO` 时默认跳过。全局模式仍不执行 UDP / IPv6 拒绝规则，完整策略需要规则模式。这个回归只验证出口选择，不代替用户设备上的 DNS、TUN 与端到端连接验收。
 
 同日进一步调整客户端启动行为：TUN 使用核心的平台自动路由范围；自动组优先安排现有 IPv4 字面量候选，保留手动列表、URI 输出、节点身份和出口隔离。40 项 Worker / workerd 测试及 2 项真实 Mihomo 回环测试通过。新增回归在域名入口不可用、没有健康检查缓存时确认初始连接通过 IPv4 后置入口；它不启动宿主 TUN，因此 macOS 的实际 TUN 效果仍需在设备上验证。
+
+全局节点选择修复：GLOBAL 默认保留 PROXY，并展示当前订阅筛选后的所有节点，供客户端全局页面直接切换。40 项 Worker / workerd 测试和 3 项真实 Mihomo 回环测试通过；新增覆盖手选节点的实际转发、重启后保留选择、切回 PROXY，以及仅后置订阅拒绝旧的无后置选择。此改动不调整 DNS 路径或 TUN。

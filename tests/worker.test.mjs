@@ -415,15 +415,21 @@ test('split Clash selectors default to SOCKS and automatic selection cannot cros
   assert(!groups.some(group => group.type === 'fallback'));
 });
 
-test('global mode follows the selected egress instead of an implicit DIRECT default', async () => {
+test('global mode defaults to PROXY and offers only the subscribed nodes for manual selection', async () => {
   for (const environment of [env, splitEnv()]) {
     for (const egress of ['all', 'direct', ...(environment === env ? [] : ['socks'])]) {
-      const body = YAML.parse(await (await get(`/s/${token}?egress=${egress}`, undefined, environment)).text());
-      const globals = body['proxy-groups'].filter(group => group.name === 'GLOBAL');
-      assert.deepEqual(globals, [{name: 'GLOBAL', type: 'select', proxies: ['PROXY']}]);
-      assert(!body['proxy-groups'].some(group => group.name !== 'GLOBAL' && group.proxies.includes('GLOBAL')));
-      if (egress === 'socks') {
-        assert.deepEqual(body['proxy-groups'].find(group => group.name === 'PROXY').proxies, ['后置 SOCKS5']);
+      for (const protocol of ['', 'vless', 'trojan', 'vmess']) {
+        const query = new URLSearchParams({egress, ...(protocol ? {protocol} : {})});
+        const body = YAML.parse(await (await get(`/s/${token}?${query}`, undefined, environment)).text());
+        const globals = body['proxy-groups'].filter(group => group.name === 'GLOBAL');
+        assert.deepEqual(globals, [{name: 'GLOBAL', type: 'select', proxies: ['PROXY', ...body.proxies.map(node => node.name)]}]);
+        assert(!globals[0].proxies.includes('DIRECT'));
+        assert.equal(new Set(globals[0].proxies).size, globals[0].proxies.length);
+        assert(!body['proxy-groups'].some(group => group.name !== 'GLOBAL' && group.proxies.includes('GLOBAL')));
+        if (egress === 'socks') {
+          assert.deepEqual(body['proxy-groups'].find(group => group.name === 'PROXY').proxies, ['后置 SOCKS5']);
+          assert(globals[0].proxies.slice(1).every(name => name.startsWith('[后置 SOCKS5] ')));
+        }
       }
     }
   }

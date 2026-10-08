@@ -305,8 +305,9 @@ function clash(list, categorized) {
   }
   // GUI clients can retain global mode when loading a rule-mode subscription.
   // Mihomo's implicit GLOBAL selector otherwise starts with DIRECT, bypassing
-  // the selected egress. Keep both modes on the same explicitly selected path.
-  groups.push({name: 'GLOBAL', type: 'select', proxies: ['PROXY']});
+  // the selected egress. Default to PROXY while exposing this subscription's
+  // filtered nodes for clients that only show GLOBAL in global mode.
+  groups.push({name: 'GLOBAL', type: 'select', proxies: ['PROXY', ...names]});
   return yaml({
     'mixed-port': 7890, 'allow-lan': false, 'bind-address': '127.0.0.1', mode: 'rule',
     // IPv6 stays enabled for TUN capture, but AAAA answers and IPv6 exits are blocked.

@@ -13,7 +13,7 @@ TUN 路由范围由 Mihomo 的 `auto-route` 按操作系统生成，订阅不强
 1. 更新自己的 Worker，再刷新并重新激活**完整订阅配置**。仅更新代理集合中的节点，不会更新顶层 TUN/DNS/rules。
 2. 安装/启用客户端服务模式，打开 TUN。根据操作系统授权创建虚拟网卡和设置路由。
 3. 关闭会覆盖订阅的自定义 DNS 覆写，或确保覆写内容与本配置一致。检查全局扩展、订阅扩展和 TUN 设置；GUI 保存的部分设置优先级可能更高。
-4. 查看客户端最终生效配置，确认 `tun.enable`、`auto-route`、`strict-route`、两条 `dns-hijack`、IPv6 捕获路由、DNS 的 `#PROXY` 以及 UDP/IPv6 拒绝规则仍在。选择**规则模式**；完整订阅的 GLOBAL 也指向 PROXY，但全局模式跳过上述拒绝规则，直连模式则绕过代理选择。
+4. 查看客户端最终生效配置，确认 `tun.enable`、`auto-route`、`strict-route`、两条 `dns-hijack`、IPv6 捕获路由、DNS 的 `#PROXY` 以及 UDP/IPv6 拒绝规则仍在。选择**规则模式**；完整订阅的 GLOBAL 默认指向 PROXY，也允许手动选择当前订阅中的节点，但全局模式跳过上述拒绝规则，直连模式则绕过代理选择。
 5. 检查内核日志，不能存在创建 TUN、配置路由或监听 DNS 失败的错误。
 
 参考：[Clash Verge Rev 配置覆盖顺序](https://www.clashverge.dev/guide/extend.html)。不同版本的菜单名称可能不同，最终配置和运行日志才是验证依据。

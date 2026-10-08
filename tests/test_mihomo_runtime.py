@@ -35,7 +35,7 @@ const config = {
   preferred: JSON.parse(process.argv[1] || '[]'),
 };
 const response = await worker.fetch(
-  new Request(`https://sub.example.test/s/${token}?egress=all`),
+  new Request(`https://sub.example.test/s/${token}?egress=${process.argv[2] || 'all'}`),
   {SUB_CONFIG: JSON.stringify(config)},
 );
 if (response.status !== 200) throw new Error('Fixture rendering failed');
@@ -123,7 +123,8 @@ class RealMihomoTests(unittest.TestCase):
                                   capture_output=True, text=True, check=True, timeout=10)
         self.generated = json.loads(rendered.stdout)
         self.assertEqual([g for g in self.generated['proxy-groups'] if g['name'] == 'GLOBAL'],
-                         [{'name': 'GLOBAL', 'type': 'select', 'proxies': ['PROXY']}])
+                         [{'name': 'GLOBAL', 'type': 'select',
+                           'proxies': ['PROXY'] + [node['name'] for node in self.generated['proxies']]}])
         # Keep the generated selector graph; only its wire transports become local fixtures.
         self.generated['proxies'] = [
             {'name': node['name'], 'type': 'socks5', 'server': '127.0.0.1',
@@ -205,10 +206,11 @@ class RealMihomoTests(unittest.TestCase):
             self.process.wait(timeout=3)
         self.process = None
 
-    def assert_post_route(self):
+    def assert_post_route(self, config=None):
+        config = config if config is not None else self.generated
         status, group = self.api('/proxies/GLOBAL')
         self.assertEqual(status, 200)
-        self.assertEqual(group['all'], ['PROXY'])
+        self.assertEqual(group['all'], ['PROXY'] + [node['name'] for node in config['proxies']])
         self.assertEqual(group['now'], 'PROXY')
         self.assertEqual(self.webpage(), b'POST')
 
@@ -231,6 +233,38 @@ class RealMihomoTests(unittest.TestCase):
         self.stop_core()
         self.start_core(self.generated)
         self.assert_post_route()
+
+    def test_global_manual_nodes_persist_and_filtered_subscriptions_revoke_removed_choices(self):
+        self.start_core(self.generated)
+        self.assert_post_route()
+        base_name = next(node['name'] for node in self.generated['proxies'] if node['name'].startswith('[无后置] '))
+        post_name = next(node['name'] for node in self.generated['proxies'] if node['name'].startswith('[后置 SOCKS5] '))
+        self.assertEqual(self.api('/proxies/GLOBAL', 'PUT', {'name': base_name})[0], 204)
+        self.assertEqual(self.webpage(), b'BASE')
+        self.assertEqual(self.api('/proxies/PROXY')[1]['now'], '后置 SOCKS5')
+
+        self.assertEqual(self.api('/proxies/GLOBAL', 'PUT', {'name': post_name})[0], 204)
+        self.assertEqual(self.webpage(), b'POST')
+        self.stop_core()
+        self.start_core(self.generated)
+        self.assertEqual(self.api('/proxies/GLOBAL')[1]['now'], post_name)
+        self.assertEqual(self.webpage(), b'POST')
+        self.assertEqual(self.api('/proxies/GLOBAL', 'PUT', {'name': 'PROXY'})[0], 204)
+        self.assert_post_route()
+
+        self.assertEqual(self.api('/proxies/GLOBAL', 'PUT', {'name': base_name})[0], 204)
+        rendered = subprocess.run(['node', '--input-type=module', '-e', RENDER, '[]', 'socks'],
+                                  cwd=ROOT, capture_output=True, text=True, check=True, timeout=10)
+        restricted = json.loads(rendered.stdout)
+        allowed = {node['name'] for node in restricted['proxies']}
+        restricted['proxies'] = [copy.deepcopy(node) for node in self.generated['proxies'] if node['name'] in allowed]
+        for key in ('mode', 'mixed-port', 'external-controller', 'log-level', 'tun', 'dns', 'profile'):
+            restricted[key] = copy.deepcopy(self.generated[key])
+        self.current_path.write_text(json.dumps(restricted), encoding='utf-8')
+        self.assertEqual(self.api('/configs?force=true', 'PUT', {'path': str(self.current_path)})[0], 204)
+        self.assert_post_route(restricted)
+        for rejected in (base_name, 'DIRECT'):
+            self.assertEqual(self.api('/proxies/GLOBAL', 'PUT', {'name': rejected})[0], 400)
 
     def test_generated_automatic_group_starts_with_ipv4_before_health_checks(self):
         preferred = [{'address': '104.16.0.1', 'name': 'IPv4 fixture'}]
@@ -268,7 +302,7 @@ class RealMihomoTests(unittest.TestCase):
             for node in config['proxies']:
                 self.assertEqual(proxies[node['name']]['history'], [])
                 self.assertEqual(proxies[node['name']]['extra'], {})
-            self.assert_post_route()
+            self.assert_post_route(config)
 
 
 if __name__ == '__main__':

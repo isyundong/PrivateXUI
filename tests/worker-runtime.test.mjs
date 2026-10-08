@@ -48,6 +48,8 @@ test('actual workerd separates SOCKS and direct profiles without sharing either 
   const body = YAML.parse(await response.text());
   assert.equal(body.proxies.length, 26);
   assert.deepEqual(body['proxy-groups'][0].proxies, ['后置 SOCKS5', '无后置']);
+  assert.deepEqual(body['proxy-groups'].find(group => group.name === 'GLOBAL').proxies,
+    ['PROXY', ...body.proxies.map(proxy => proxy.name)]);
   for (const group of body['proxy-groups'].filter(group => group.type === 'url-test')) {
     const credentials = group.proxies.map(name => body.proxies.find(proxy => proxy.name === name).uuid);
     assert.equal(new Set(credentials).size, 1);
