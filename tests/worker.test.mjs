@@ -144,7 +144,7 @@ test('no preferred addresses means one entry per configured protocol, not one ov
   assert(all.proxies.every(proxy => proxy.name.includes('域名入口')));
   const vless = YAML.parse(await (await get(`/s/${token}?protocol=vless`, undefined, direct)).text());
   assert.equal(vless.proxies.length, 1);
-  assert.equal(vless['proxy-groups'].length, 1);
+  assert.equal(vless['proxy-groups'].length, 2);
 });
 
 test('six candidate entries produce 21 usable definitions and client-side latency selection', async () => {
@@ -410,6 +410,20 @@ test('split Clash selectors default to SOCKS and automatic selection cannot cros
   assert(!groups.some(group => group.type === 'fallback'));
 });
 
+test('global mode follows the selected egress instead of an implicit DIRECT default', async () => {
+  for (const environment of [env, splitEnv()]) {
+    for (const egress of ['all', 'direct', ...(environment === env ? [] : ['socks'])]) {
+      const body = YAML.parse(await (await get(`/s/${token}?egress=${egress}`, undefined, environment)).text());
+      const globals = body['proxy-groups'].filter(group => group.name === 'GLOBAL');
+      assert.deepEqual(globals, [{name: 'GLOBAL', type: 'select', proxies: ['PROXY']}]);
+      assert(!body['proxy-groups'].some(group => group.name !== 'GLOBAL' && group.proxies.includes('GLOBAL')));
+      if (egress === 'socks') {
+        assert.deepEqual(body['proxy-groups'].find(group => group.name === 'PROXY').proxies, ['后置 SOCKS5']);
+      }
+    }
+  }
+});
+
 test('filtered Clash subscriptions contain only the selected credential and matching group', async () => {
   for (const [egress, label, credential, otherCredential] of [
     ['direct', '无后置', uuid, egressUuid], ['socks', '后置 SOCKS5', egressUuid, uuid],
@@ -433,7 +447,7 @@ test('single-node filtered groups keep the selected egress without an unnecessar
     const response = await get(`/s/${token}?egress=${egress}&protocol=vless`, undefined, splitEnv({preferred: []}));
     const body = YAML.parse(await response.text());
     assert.equal(body.proxies.length, 1);
-    assert.deepEqual(body['proxy-groups'].map(group => group.type), ['select', 'select']);
+    assert.deepEqual(body['proxy-groups'].map(group => group.type), ['select', 'select', 'select']);
     assert.deepEqual(body['proxy-groups'][0].proxies, [label]);
     assert.deepEqual(body['proxy-groups'][1].proxies, [body.proxies[0].name]);
   }

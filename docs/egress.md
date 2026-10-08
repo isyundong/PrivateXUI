@@ -41,6 +41,8 @@ https://sub.example.com/s/<令牌>/Private-XUI.yaml
 
 后置与无后置分别拥有自己的测速组。后置测速组不含无后置节点，因此上游故障不会自动回落到无后置路径。可以手动切换到无后置组。客户端可能保留此前的 PROXY 选择，更新订阅后请核对当前组选项；需要只允许后置时，导入 `?egress=socks`。
 
+完整订阅显式定义 `GLOBAL → PROXY`，让客户端保留全局模式时也采用当前出口选择，避免内核自动生成的 GLOBAL 默认选择 DIRECT。UDP / IPv6 拒绝规则仍需使用规则模式才能执行；全局模式不会执行这些规则。
+
 订阅标题和下载文件名带出口类别，支持同时导入两份配置。`protocol=vless|trojan|vmess` 与 `format=clash|raw|base64` 可以继续组合使用。未配置后置或已完成禁用并同步 Worker 时，`egress=socks` 返回不可用，不会替换为无后置列表。
 
 SOCKS5 上游地址、用户名、密码不发送给 Worker，也不写入订阅；Worker 仅获得两类节点各自的入口 UUID。

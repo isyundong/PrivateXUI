@@ -55,3 +55,13 @@ PRIVATE_XUI_XRAY=/你已核验的/xray python3 -m unittest discover -s tests -p 
 独立审核发现并修复了发布失败后禁止本地撤销、API 删除标签后的清理冲突、v3 额外关联遗漏、非主线程进程发现及用户名空格裁剪问题。六张生产 `TerminalUI` 的真实 PTY 截图见 [界面说明](interface.md)，覆盖首页、八项维护、三类订阅、后置设置与两种 Dashboard 尺寸。截图使用演示数据。
 
 仍需在目标 VPS 验证真实 3x-ui / systemd 生命周期、Cloudflare 发布和用户自己的 SOCKS5 服务。运行配置核实不等同公网出口 IP 或 UDP 连通性验收。
+
+## 2026-10-08：全局模式使用当前出口选择
+
+完整订阅现在显式定义 `GLOBAL → PROXY`，避免客户端保留全局模式时使用内核自动生成的 DIRECT 默认项。39 项 Worker / workerd 测试通过；新增一个可选的真实 Mihomo v1.19.29 回环测试，覆盖旧 DIRECT 缓存、配置热重载、同缓存重启及实际 HTTP 转发路径。测试使用真实 Worker 生成的分组和本地模拟出口，不访问外部服务，也不改变宿主 TUN 或系统路由。
+
+```bash
+PRIVATE_XUI_MIHOMO=/你已核验的/mihomo python3 -m unittest discover -s tests -p 'test_mihomo_runtime.py' -v
+```
+
+该测试需本地 Node.js 与已安装的开发依赖；未设置 `PRIVATE_XUI_MIHOMO` 时默认跳过。全局模式仍不执行 UDP / IPv6 拒绝规则，完整策略需要规则模式。这个回归只验证出口选择，不代替用户设备上的 DNS、TUN 与端到端连接验收。
