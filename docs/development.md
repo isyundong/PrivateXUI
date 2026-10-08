@@ -29,43 +29,18 @@ Python 测试使用临时数据库和模拟云接口；不会修改开发电脑�
 
 TUI Dashboard 新增本地采集、时间增量/重置/缺口、日志游标与轮转、保留上限、安装中断恢复、字段级还原和终端键盘/布局测试。纯 TUI，无 HTTP 监听。102 项 Python 测试在 3.14 与 3.9 通过；截图来自真实 curses PTY 的演示数据。systemd 生命周期使用隔离模拟，未在用户 VPS 实装验收。
 
-## 2026-10-07：新版 TUI、后置出口与双身份订阅
+## 当前 TUI 与客户端配置验证
 
-本轮本地验证：**140 项 Python 测试、38 项 Worker 测试通过**。其中 Python 包含两个可选真实 Xray 测试；Worker 包含实际 workerd / Miniflare 验证。构建一致性、SHA-256、`bash -n install.sh` 与 `git diff --check` 均通过。构建文件已更新；以上为本地验证，未在用户 VPS 实装验收。
+新版终端界面保留 Neutral / Blue 配色、焦点、确认摘要滚动和窄屏布局，覆盖 52×20、80×24、120×36。Dashboard 的 C 与 ? 快捷键及统计功能保持可用。设计归档见 [设计说明](../design/tui-shadcn/README.md)，现有 Dashboard 截图见 [界面说明](interface.md)。
 
-新增测试覆盖：
+客户端配置保留 GLOBAL 默认选择 PROXY 并允许手动选节点、自动组优先使用已有 IPv4 入口、TUN 使用核心的平台自动路由范围。网站 DNS 仍经 PROXY；完整 UDP / IPv6 拒绝策略需要规则模式。
 
-- 原客户端与后置客户端身份隔离，legacy / v3 规范化表及客户端关联保留。
-- 专属出站与身份同事务变更，写前恢复记录、并发模板修改、重试身份稳定、Worker 发布失败后的本地撤销。
-- 仅在本项目入站删除后清理出口；兼容面板 API 自动裁剪 `inboundTag`，保护其他存活入站的 JSON 与规范化表关联。
-- Go 非主线程启动的 Xray 进程发现、加载身份与路由检查、旧凭据撤销检查。
-- 凭据不进入 Worker、状态或订阅；用户名 / 密码空格保留、密码隐藏与错误消息遮蔽。
-- 三种订阅筛选、独立测速组、默认后置组、后置不可用时明确报错、公开来源请求不包含任一入口 UUID。
-
-真实核心测试使用官方下载并核验 SHA-256 的 **Xray 26.3.27**，测试只监听回环地址，使用本地模拟 HTTP 目标与 SOCKS5 上游，不访问外部目标网站。验证 VLESS、Trojan、VMess 各自的无后置 / 后置路径、目的域名传递，以及认证失败、上游失联和身份撤销时不回退。
-
-复现可选真实核心测试：
-
-```bash
-PRIVATE_XUI_XRAY=/你已核验的/xray python3 -m unittest discover -s tests -p 'test_egress_runtime.py' -v
-```
-
-没有设置此变量时，常规测试跳过这两个真实核心用例。测试不会下载或安装 Xray，不改变系统路由，也不操作真实 systemd / Cloudflare。
-
-独立审核发现并修复了发布失败后禁止本地撤销、API 删除标签后的清理冲突、v3 额外关联遗漏、非主线程进程发现及用户名空格裁剪问题。六张生产 `TerminalUI` 的真实 PTY 截图见 [界面说明](interface.md)，覆盖首页、八项维护、三类订阅、后置设置与两种 Dashboard 尺寸。截图使用演示数据。
-
-仍需在目标 VPS 验证真实 3x-ui / systemd 生命周期、Cloudflare 发布和用户自己的 SOCKS5 服务。运行配置核实不等同公网出口 IP 或 UDP 连通性验收。
-
-## 2026-10-08：全局模式使用当前出口选择
-
-完整订阅现在显式定义 `GLOBAL → PROXY`，避免客户端保留全局模式时使用内核自动生成的 DIRECT 默认项。39 项 Worker / workerd 测试通过；新增一个可选的真实 Mihomo v1.19.29 回环测试，覆盖旧 DIRECT 缓存、配置热重载、同缓存重启及实际 HTTP 转发路径。测试使用真实 Worker 生成的分组和本地模拟出口，不访问外部服务，也不改变宿主 TUN 或系统路由。
+可选真实 Mihomo 回归使用 Worker 生成的普通节点分组与回环模拟出口，不访问外部服务，也不改变宿主 TUN 或系统路由：
 
 ```bash
 PRIVATE_XUI_MIHOMO=/你已核验的/mihomo python3 -m unittest discover -s tests -p 'test_mihomo_runtime.py' -v
 ```
 
-该测试需本地 Node.js 与已安装的开发依赖；未设置 `PRIVATE_XUI_MIHOMO` 时默认跳过。全局模式仍不执行 UDP / IPv6 拒绝规则，完整策略需要规则模式。这个回归只验证出口选择，不代替用户设备上的 DNS、TUN 与端到端连接验收。
+该测试需本地 Node.js 与已安装的开发依赖；未设置 PRIVATE_XUI_MIHOMO 时默认跳过。它验证全局节点选择、缓存恢复和无需域名入口即可启动，不代替用户设备上的 DNS、TUN 与端到端验收。
 
-同日进一步调整客户端启动行为：TUN 使用核心的平台自动路由范围；自动组优先安排现有 IPv4 字面量候选，保留手动列表、URI 输出、节点身份和出口隔离。40 项 Worker / workerd 测试及 2 项真实 Mihomo 回环测试通过。新增回归在域名入口不可用、没有健康检查缓存时确认初始连接通过 IPv4 后置入口；它不启动宿主 TUN，因此 macOS 的实际 TUN 效果仍需在设备上验证。
-
-全局节点选择修复：GLOBAL 默认保留 PROXY，并展示当前订阅筛选后的所有节点，供客户端全局页面直接切换。40 项 Worker / workerd 测试和 3 项真实 Mihomo 回环测试通过；新增覆盖手选节点的实际转发、重启后保留选择、切回 PROXY，以及仅后置订阅拒绝旧的无后置选择。此改动不调整 DNS 路径或 TUN。
+当前验证：Python 常规测试 113 项通过，3 项可选 Mihomo 用例在普通运行中跳过并单独实核验证通过；Worker / workerd 测试 29 项通过。构建一致性、SHA-256、安装脚本语法与差异检查均通过。

@@ -117,7 +117,7 @@ def subscription_count(state):
         if item.get('address'):
             addresses.add(item['address'])
     addresses.discard('')
-    return len(state.get('routes', [])) * len(addresses) * (2 if state.get('egress') else 1)
+    return len(state.get('routes', [])) * len(addresses)
 
 
 def panel_status(installed):
@@ -153,7 +153,6 @@ def dashboard_state(state_path, report, installed):
             '选择「部署」开始；输入完成后才会执行安装。',
         ]},
         'focus': 'install',
-        'egress': {'summary': '未配置 · 沿用原路由', 'tone': 'muted'},
     }
     if not Path(state_path).exists():
         return model
@@ -167,8 +166,6 @@ def dashboard_state(state_path, report, installed):
         model['focus'] = 'maintenance'
         return model
     status = state.get('status')
-    import egress
-    model['egress'] = egress.status(state)
     labels = {'ready': '已部署 · 本机记录', 'installing': '安装未完成', 'incomplete': '安装未完成',
               'cleanup-needed': '清理未完成', 'update-pending': '更新待恢复'}
     model['deployment']['badge'] = (labels.get(status, '状态待检查'), 'good' if status == 'ready' else 'warning')
@@ -220,11 +217,6 @@ def dashboard_state(state_path, report, installed):
             '在服务器执行 systemctl status x-ui 查看原因。',
         ]}
         model['focus'] = 'maintenance'
-    elif model['egress']['tone'] == 'warning' and status == 'ready':
-        model['notice'] = {'title': '后置出口需要处理', 'tone': 'warning', 'lines': [
-            model['egress']['detail'], '维护 → 后置出口 → 检查 / 重试应用',
-        ]}
-        model['focus'] = 'maintenance'
     return model
 
 
@@ -248,30 +240,17 @@ def status_lines(state_path, report, installed):
     lines.append('订阅     %s · %s' % (state.get('subscription_domain', '未配置'), quantity))
     protocols = ' / '.join(str(route.get('protocol', '')).upper() for route in state.get('routes', []))
     lines.append('节点     %s · %s' % (state.get('domain', '未配置'), protocols or '未创建'))
-    import egress
-    lines.append('后置出口 ' + egress.status(state)['summary'])
     if domain_only(state):
         lines.append('下一步   维护 → 订阅设置 → 自动优选')
     return lines
 
 
-def show_subscription(state_path, selection=None):
+def show_subscription(state_path):
     import manage as m
     state = m.load(state_path)
     if state.get('status') != 'ready':
         print('部署尚未完成，请先在“维护”中恢复；当前订阅可能不可用。')
     print('%s · Clash / Mihomo' % state.get('subscription_name', 'Private XUI'))
-    if selection is not None:
-        labels = {'all': '完整订阅 · 默认后置组' if state.get('egress') else '完整订阅 · 无后置',
-                  'direct': '仅无后置 · 原有路由', 'socks': '仅后置 SOCKS5'}
-        if selection not in labels or selection == 'socks' and not state.get('egress'):
-            raise ValueError('当前后置订阅不可用，请先配置后置出口')
-        print(labels[selection])
-        if state.get('egress_subscription_pending') or state.get('egress_pending'):
-            print('出口或订阅待同步，请先在后置出口完成重试。')
-        print('\n' + m.subscription_url(state, selection))
-        print('\n复制此完整地址导入客户端；地址包含访问令牌，请勿公开。')
-        return
     count = subscription_count(state)
     if count is None:
         print('自动优选：节点数量随公开地址池变化，以客户端更新后的订阅为准。')
@@ -280,15 +259,8 @@ def show_subscription(state_path, selection=None):
         print('启用路径：维护 → 订阅设置 → 自动优选。')
     else:
         print('共 %s 条节点配置；不同 CF 入口共用同一台 VPS。' % count)
-    print('\n完整订阅' + ('（默认后置组，包含两类节点）' if state.get('egress') else '（当前无后置）'))
-    print(m.subscription_url(state))
-    if state.get('egress'):
-        print('\n仅无后置（原有路由）\n' + m.subscription_url(state, 'direct'))
-        print('\n仅后置 SOCKS5\n' + m.subscription_url(state, 'socks'))
-        print('\n两类节点使用独立身份，自动测速不会在两类出口之间回退。')
-    if state.get('egress_subscription_pending') or state.get('egress_pending'):
-        print('\n后置出口或订阅尚未同步；请在“维护 → 后置出口”重试后再更新客户端。')
-    print('\n复制所需的完整地址导入客户端；地址包含访问令牌，请勿公开。')
+    print('\n' + m.subscription_url(state))
+    print('\n复制上方完整地址导入客户端；此地址包含访问令牌，请勿公开。')
 
 
 def operation(callback, state_path):
@@ -329,7 +301,7 @@ class GuidedUI:
                 if selected == 'install':
                     self.install(installed)
                 elif selected == 'subscription':
-                    self.subscription_menu()
+                    self.task(lambda: show_subscription(self.state_path))
                 elif selected == 'dashboard':
                     self.dashboard_menu()
                 elif selected == 'auto-settings':
@@ -348,23 +320,6 @@ class GuidedUI:
         import manage as m
         args = argparse.Namespace(command=command, state=self.state_path, quiet_links=True, **options)
         self.task(lambda: m.run_command(args))
-
-    def subscription_menu(self):
-        import manage as m
-        while True:
-            state = m.load(self.state_path)
-            items = [('all', '完整订阅', '包含已配置的出口类别；启用后置时默认后置组'),
-                     ('direct', '仅无后置', '只显示无后置节点，沿用服务器原有路由')]
-            if state.get('egress'):
-                items.append(('socks', '仅后置 SOCKS5', '只显示独立后置身份；失败不会自动切到无后置'))
-            summary = [state.get('subscription_name', 'Private XUI') + ' · Clash / Mihomo',
-                       '后置 / 无后置分组与独立身份' if state.get('egress') else '当前仅无后置；可在维护中配置 SOCKS5']
-            if state.get('egress_subscription_pending') or state.get('egress_pending'):
-                summary.append('出口或订阅待同步：维护 → 后置出口 → 重试')
-            selected = self.ui.choose('订阅', items, summary=summary)
-            if selected is None:
-                return
-            self.task(lambda mode=selected: show_subscription(self.state_path, mode))
 
     def install(self, installed):
         import manage as m
@@ -394,7 +349,6 @@ class GuidedUI:
             selected = self.ui.choose('维护', [
                 ('update', '更新订阅服务', '更新 Worker，保留名称、节点和自有优选列表'),
                 ('settings', '订阅设置', '修改显示名称与 CF 入口；无需手工编辑 JSON'),
-                ('egress', '后置出口 · SOCKS5', '独立的后置节点身份；与无后置订阅分组显示'),
                 ('check', '连接与凭据检查', '检查节点回源、Cloudflare 权限或系统环境'),
                 ('panel', '查看面板访问', '显示面板账号和 SSH 隧道访问方法'),
                 ('rotate', '更换订阅令牌', '使旧订阅地址失效，完成后需重新导入客户端'),
@@ -407,8 +361,6 @@ class GuidedUI:
                 self.command('update-worker', preferred=None, preferred_mode=None, subscription_name=None)
             elif selected == 'settings':
                 self.settings()
-            elif selected == 'egress':
-                self.egress_menu()
             elif selected == 'dashboard':
                 self.dashboard_menu()
             elif selected == 'panel':
@@ -421,64 +373,8 @@ class GuidedUI:
             elif selected == 'uninstall':
                 state = m.load(self.state_path)
                 if self.ui.confirm('卸载本项目', ['节点   ' + state['domain'], '订阅   ' + state['subscription_domain'],
-                                               '清理本项目节点、Worker、DNS、规则、后置出口及 Dashboard 采集。', '保留 3x-ui 面板及其他节点。'], destructive=True):
+                                               '清理本项目节点、Worker、DNS、规则及 Dashboard 采集。', '保留 3x-ui 面板及其他节点。'], destructive=True):
                     self.command('uninstall')
-
-    def egress_menu(self):
-        import egress
-        import manage as m
-        while True:
-            state = m.load(self.state_path)
-            info = egress.status(state)
-            pending = state.get('egress_pending') or state.get('egress_subscription_pending')
-            action = self.ui.choose('后置出口 · SOCKS5', [
-                ('configure', '配置 / 更改 SOCKS5', '填写主机与可选认证；无后置节点继续原有路由'),
-                ('check', '检查 SOCKS5 连接', '检查协商与认证，不改变任何出口规则'),
-                ('retry', '重试应用 / 发布订阅', '继续未完成的服务端设置和订阅同步'),
-                ('disable', '禁用后置出口', '撤销后置节点身份；保留无后置节点'),
-            ], summary=[info['summary'], info['detail']], initial='retry' if pending else 'configure')
-            if action is None:
-                return
-            if action == 'check':
-                self.command('egress', action='check')
-                continue
-            config = None
-            if action == 'configure':
-                if pending:
-                    self.task(lambda: print('请先选择“重试应用 / 发布订阅”完成当前设置。'))
-                    continue
-                old = egress.config_of(state.get('egress')) or {}
-                host = self.ui.ask('后置出口 · 1 / 4', 'SOCKS5 主机', egress.address,
-                                   default=old.get('address', ''), hint='填写 IPv4、IPv6 或域名，不带协议和端口。')
-                port = self.ui.ask('后置出口 · 2 / 4', 'SOCKS5 端口', egress.port, default=str(old.get('port', 1080)))
-                auth = self.ui.choose('后置出口 · 认证方式', [
-                    ('none', '无认证', '不发送用户名或密码'), ('password', '用户名和密码', '使用 SOCKS5 用户名 / 密码认证'),
-                ], initial='password' if old.get('username') else 'none')
-                if auth is None:
-                    continue
-                config = {'address': host, 'port': port}
-                if auth == 'password':
-                    user = self.ui.ask('后置出口 · 3 / 4', 'SOCKS5 用户名', egress.credential,
-                                       default=old.get('username', ''), preserve_whitespace=True)
-                    keep = user == old.get('username') and bool(old.get('password'))
-                    password = self.ui.ask('后置出口 · 4 / 4', 'SOCKS5 密码', egress.credential, secret=True,
-                                           allow_empty=keep, hint='留空保留现有密码。' if keep else '密码隐藏输入，仅保存于服务器私有配置。')
-                    config.update(username=user, password=old['password'] if keep and password is None else password)
-                config = egress.normalize(config)
-                summary = ['后置节点 → SOCKS5 ' + egress.endpoint(config),
-                           '无后置节点 → 原有路由；两类使用独立身份。',
-                           '完整订阅默认选择后置组，支持分别导入两类订阅。',
-                           '后置失败不自动直连；UDP 需要上游支持。']
-            elif action == 'disable':
-                summary = ['撤销后置客户端身份，并移除专属出口规则。',
-                           '缓存的后置节点会失效；无后置节点继续原有路由。',
-                           '客户端更新订阅后不再显示后置组。']
-            else:
-                summary = ['继续已保存的出口配置与订阅同步。',
-                           '复用原后置身份，完成后再更新客户端订阅。']
-            summary.append('将重启 x-ui 并同步 Worker，连接可能短暂中断。')
-            if self.ui.confirm('确认后置出口设置', summary, destructive=action == 'disable'):
-                self.command('egress', action=action, config_data=config, config=None, yes=True)
 
     def dashboard_menu(self):
         import dashboard_service as service
@@ -593,7 +489,7 @@ def text_menu(state_path, report):
 
 def text_maintenance(state_path):
     import manage as m
-    print('\n维护：1 更新订阅  2 订阅设置  3 连接检查  4 面板  5 更换令牌  6 卸载  7 Dashboard  8 后置出口  0 返回')
+    print('\n维护：1 更新订阅  2 订阅设置  3 连接检查  4 面板  5 更换令牌  6 卸载  7 Dashboard  0 返回')
     choice = input('选择: ').strip()
     options = {'quiet_links': True}
     command = None
@@ -620,10 +516,6 @@ def text_maintenance(state_path):
         import dashboard_service as service
         action = ask('Dashboard：1 打开 TUI / 2 启用采集 / 3 停止采集 / 4 状态', lambda v: {'1':'open','2':'install','3':'uninstall','4':'status'}[v], default='1' if dash.CONFIG.exists() else '2')
         operation(lambda: service.command(argparse.Namespace(state=state_path, action=action, retention_days=30, access_log=None, yes=False)), state_path)
-    elif choice == '8':
-        action = ask('后置出口：1 配置 / 2 状态 / 3 检查 / 4 禁用 / 5 重试',
-                     lambda v: {'1': 'configure', '2': 'status', '3': 'check', '4': 'disable', '5': 'retry'}[v], default='2')
-        operation(lambda: m.run_command(argparse.Namespace(command='egress', state=state_path, action=action, config=None, yes=False)), state_path)
     elif choice == '6' and confirm('删除本项目节点和订阅，保留面板及其他节点，确认卸载'):
         command = 'uninstall'
     if command:

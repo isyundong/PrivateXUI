@@ -263,9 +263,6 @@ class TerminalUI:
         selected = next((i for i, item in enumerate(items) if item[0] == focus), 0)
         captions = {'install': '首次安装', 'subscription': '查看完整地址',
                     'maintenance': '更新 / 检查', 'exit': '保留服务'}
-        egress = model.get('egress')
-        egress_text = egress.get('summary', egress.get('value', '本机直出')) if isinstance(egress, dict) else egress
-        egress_tone = egress.get('tone', 'muted') if isinstance(egress, dict) else 'muted'
         while True:
             ready = self.header('控制台  /  部署状态来自本机记录')
             height, width = self.screen.getmaxyx()
@@ -278,9 +275,6 @@ class TerminalUI:
                     self.status_card(top, 2, card_height, card_width, model['server'])
                     self.status_card(top, card_width + 4, card_height, width - card_width - 6, model['deployment'])
                     notice_top = top + card_height + (2 if spacious else 1)
-                    if egress_text:
-                        self.text(notice_top, 2, elide('后置出口  ' + str(egress_text), width - 4), self.tone(egress_tone))
-                        notice_top += 2
                     self.box(notice_top, 2, 4 if spacious else 3, width - 4)
                     self.text(notice_top + 1, 4, elide(notice['title'], width - 8), self.tone(notice['tone']))
                     if spacious and notice['lines']:
@@ -299,9 +293,6 @@ class TerminalUI:
                     for index, (label, value, tone) in enumerate(rows):
                         self.text(5 + index, 2, label, self.dim)
                         self.text(5 + index, 10, elide(value, width - 12), self.tone(tone))
-                    if egress_text:
-                        self.text(10, 2, '后置出口', self.dim)
-                        self.text(10, 12, elide(egress_text, width - 14), self.tone(egress_tone))
                     self.text(11, 2, elide(notice['title'], width - 4), self.tone(notice['tone']))
                     compact = notice.get('compact_lines', notice['lines'])
                     if compact:
@@ -323,8 +314,6 @@ class TerminalUI:
                 lines = ['首页：1 部署，2 订阅，3 维护，4 退出。', 'D 查看流量；A 在有提示时进入自动优选。']
                 for card in (model['server'], model['deployment']):
                     lines += ['', card['title'] + ' · ' + card['badge'][0]] + [label + '  ' + str(value) for label, value, _ in card['rows']]
-                if egress_text:
-                    lines += ['', '后置出口  ' + str(egress_text)]
                 self.details('控制台 / 状态与帮助', lines + ['', notice['title']] + list(notice['lines']))
             elif key in ('d', 'D'):
                 return 'dashboard'

@@ -180,24 +180,7 @@ async function authorized(token, expected) {
   return difference === 0;
 }
 
-function validateNodeCredentials(config) {
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const valid = value => typeof value === 'string' && value.length === 36 && uuid.test(value);
-  if (!valid(config.uuid)) throw new Error('Invalid node credential');
-  if (Object.hasOwn(config, 'egress_profile')) {
-    // Only the second inbound credential belongs here. SOCKS server details and
-    // authentication stay on the origin and never enter a subscription binding.
-    const profile = config.egress_profile;
-    if (!profile || typeof profile !== 'object' || Array.isArray(profile)
-      || Object.keys(profile).some(key => key !== 'uuid')
-      || !valid(profile.uuid)
-      || profile.uuid.toLowerCase() === config.uuid.toLowerCase()) {
-      throw new Error('Invalid egress credential');
-    }
-  }
-}
-
-function nodes(config, protocol, egress, categorized) {
+function nodes(config, protocol) {
   // A candidate address changes only the Cloudflare entry point; SNI/Host and
   // the origin credentials stay the same. Keep the normal DNS entry as fallback.
   const seen = new Set();
@@ -209,22 +192,15 @@ function nodes(config, protocol, egress, categorized) {
       return true;
     });
   const routes = config.routes.filter(route => !protocol || route.protocol === protocol);
-  // Put the post-proxy profile first for clients which select the first URI.
-  // Different credentials select origin routing, with identical entry points.
-  const profiles = [
-    ...(config.egress_profile ? [{egress: 'socks', label: '后置 SOCKS5', credential: config.egress_profile.uuid}] : []),
-    {egress: 'direct', label: '无后置', credential: config.uuid},
-  ].filter(profile => egress === 'all' || profile.egress === egress);
-  return profiles.flatMap(profile => routes.flatMap(route => endpoints.map((endpoint, i) => ({
-    name: `${categorized ? `[${profile.label}] ` : ''}${route.protocol.toUpperCase()} · ${endpoint.name || endpoint.address} · ${i + 1}`,
-    egress: profile.egress,
+  return routes.flatMap(route => endpoints.map((endpoint, i) => ({
+    name: `${route.protocol.toUpperCase()} · ${endpoint.name || endpoint.address} · ${i + 1}`,
     protocol: route.protocol,
     server: endpoint.address,
     port: 443,
     host: config.domain,
     path: route.path,
-    credential: profile.credential,
-  }))));
+    credential: config.uuid,
+  })));
 }
 
 function uri(node) {
@@ -262,7 +238,7 @@ function yaml(value, depth = 0) {
   }).join('\n');
 }
 
-function clash(list, categorized) {
+function clash(list) {
   // Quote every string so paths, Unicode names and credentials remain literal YAML.
   const proxies = list.map(node => ({
     name: node.name, type: node.protocol, server: node.server, port: node.port,
@@ -274,39 +250,22 @@ function clash(list, categorized) {
   }));
   const names = proxies.map(node => node.name);
   const ipv4Names = new Set(list.filter(node => ipv4Number(node.server) !== null).map(node => node.name));
-  const groups = [{name: 'PROXY', type: 'select', proxies: []}];
-  function addSelection(name, choices, automaticName) {
-    const group = name === 'PROXY' ? groups[0] : {name, type: 'select', proxies: []};
-    group.proxies = choices.length > 1 ? [automaticName, ...choices] : choices;
-    if (name !== 'PROXY') groups.push(group);
-    if (choices.length > 1) groups.push({
-      name: automaticName, type: 'url-test',
-      // Until health checks finish the first member is used. Prefer existing
-      // IPv4 entries so initial proxy DNS does not need a node DNS lookup first.
-      // This only orders candidates; reachability is still measured by the client.
-      proxies: [...choices.filter(choice => ipv4Names.has(choice)),
-        ...choices.filter(choice => !ipv4Names.has(choice))],
+  const groups = [{name: 'PROXY', type: 'select', proxies: names}];
+  if (names.length > 1) {
+    groups[0].proxies = ['自动选择', ...names];
+    groups.push({
+      name: '自动选择', type: 'url-test',
+      // Before health results are available, prefer existing IPv4 entries so
+      // initial proxy DNS does not depend on resolving a node domain first.
+      // This orders candidates without claiming that any entry is reachable.
+      proxies: [...names.filter(name => ipv4Names.has(name)),
+        ...names.filter(name => !ipv4Names.has(name))],
       // Measured by the client over the complete proxy path. This is a latency
       // and reachability check, not a bandwidth benchmark or a server-side claim.
       url: 'https://www.gstatic.com/generate_204', interval: 300, tolerance: 50,
     });
   }
-  if (categorized) {
-    // Every automatic selector stays within its egress category. An unavailable
-    // SOCKS exit must never automatically select a node with the direct UUID.
-    for (const [egress, label] of [['socks', '后置 SOCKS5'], ['direct', '无后置']]) {
-      const choices = list.filter(node => node.egress === egress).map(node => node.name);
-      if (!choices.length) continue;
-      groups[0].proxies.push(label);
-      addSelection(label, choices, `自动选择 · ${label}`);
-    }
-  } else {
-    addSelection('PROXY', names, '自动选择');
-  }
-  // GUI clients can retain global mode when loading a rule-mode subscription.
-  // Mihomo's implicit GLOBAL selector otherwise starts with DIRECT, bypassing
-  // the selected egress. Default to PROXY while exposing this subscription's
-  // filtered nodes for clients that only show GLOBAL in global mode.
+  // Keep a safe default while allowing direct node selection in GUI global mode.
   groups.push({name: 'GLOBAL', type: 'select', proxies: ['PROXY', ...names]});
   return yaml({
     'mixed-port': 7890, 'allow-lan': false, 'bind-address': '127.0.0.1', mode: 'rule',
@@ -316,8 +275,7 @@ function clash(list, categorized) {
       enable: true, stack: 'gvisor', 'auto-route': true, 'strict-route': true,
       'auto-detect-interface': true, 'dns-hijack': ['any:53', 'tcp://any:53'],
       'inet6-address': ['fdfe:dcba:9876::1/126'],
-      // Use the core's platform-specific auto-route ranges. Explicit /0 routes
-      // bypass macOS's split routes and can interfere with interface detection.
+      // Leave route ranges to the core's platform-specific auto-route defaults.
     },
     dns: {
       enable: true, listen: '127.0.0.1:1053', ipv6: false,
@@ -335,20 +293,17 @@ function clash(list, categorized) {
   }) + '\n';
 }
 
-function subscriptionHeaders(config, format, egress, categorized) {
+function subscriptionHeaders(config, format) {
   // Keep filenames and response headers independent of the bearer token.
   // filename* is understood by Clash Verge; the ASCII fallback is for older clients.
-  const baseTitle = Array.from(String(config.subscription_name || 'Private XUI')
+  const title = Array.from(String(config.subscription_name || 'Private XUI')
     .replace(/[\u0000-\u001f\u007f-\u009f\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim())
     .slice(0, 80).join('') || 'Private XUI';
-  const title = categorized
-    ? `${baseTitle} · ${{all: '全部出口', direct: '无后置', socks: '后置 SOCKS5'}[egress]}` : baseTitle;
-  const suffix = categorized ? `-${egress}` : '';
   const extension = format === 'clash' ? 'yaml' : 'txt';
   const filename = encodeURIComponent(`${title}.${extension}`).replace(/['()*]/g,
     character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
   return {
-    'Content-Disposition': `attachment; filename="Private-XUI${suffix}.${extension}"; filename*=UTF-8''${filename}`,
+    'Content-Disposition': `attachment; filename="Private-XUI.${extension}"; filename*=UTF-8''${filename}`,
     'Profile-Title': `base64:${base64(title)}`,
     'Profile-Update-Interval': '24',
   };
@@ -367,29 +322,22 @@ export default {
       const token = match?.[1] || (url.pathname === '/sub' && bearer.startsWith('Bearer ') ? bearer.slice(7) : '');
       if (!await authorized(token, config.token_sha256)) return reply('Not found', 404);
       for (const key of url.searchParams.keys()) {
-        if (!['format', 'protocol', 'egress'].includes(key)) return reply('Unsupported parameter', 400);
+        if (!['format', 'protocol'].includes(key)) return reply('Unsupported parameter', 400);
       }
       const format = url.searchParams.get('format') || 'clash';
       const protocol = url.searchParams.get('protocol');
-      const egress = url.searchParams.get('egress') ?? 'all';
-      if (!['all', 'direct', 'socks'].includes(egress) || url.searchParams.getAll('egress').length > 1) {
-        return reply('Unsupported egress', 400);
-      }
       if (protocol && !['vless', 'trojan', 'vmess'].includes(protocol)) return reply('Unsupported protocol', 400);
       if (!['base64', 'raw', 'clash'].includes(format)) return reply('Unsupported format', 400);
-      validateNodeCredentials(config);
-      if (egress === 'socks' && !config.egress_profile) return reply('Subscription unavailable', 404);
       if (!config.routes.some(route => !protocol || route.protocol === protocol)) return reply('Protocol not configured', 404);
-      const categorized = Boolean(config.egress_profile) || egress === 'direct';
       const activeConfig = config.preferred_mode === 'auto'
         ? {...config, preferred: await automaticEndpoints(config.preferred_github === true)} : config;
-      const list = nodes(activeConfig, protocol, egress, categorized);
+      const list = nodes(activeConfig, protocol);
       if (!list.length) return reply('Protocol not configured', 404);
       const raw = list.map(uri).join('\n');
-      const body = format === 'clash' ? clash(list, categorized) : format === 'raw' ? raw : base64(raw);
+      const body = format === 'clash' ? clash(list) : format === 'raw' ? raw : base64(raw);
       return reply(request.method === 'HEAD' ? null : body, 200,
         format === 'clash' ? 'text/yaml; charset=utf-8' : 'text/plain; charset=utf-8',
-        subscriptionHeaders(config, format, egress, categorized));
+        subscriptionHeaders(config, format));
     } catch {
       // Never return request URLs, bindings, credentials, or exception details.
       return reply('Subscription unavailable', 503);

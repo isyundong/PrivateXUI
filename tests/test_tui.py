@@ -120,21 +120,6 @@ class TerminalTests(unittest.TestCase):
                 self.assertTrue(any('3 维护' in row[2] and row[3] == ui.selected for row in screen.writes))
                 self.assertIn('─', screen.frames[-1][dimensions[0] - 3])
 
-    def test_home_exposes_egress_summary_without_credentials(self):
-        for dimensions in ((20, 52), (24, 80), (36, 120)):
-            for summary in ('SOCKS5 relay.example.net:1080', '本机直出', '待恢复'):
-                with self.subTest(dimensions=dimensions, summary=summary):
-                    ui, screen = self.ui(['q'], dimensions)
-                    model = {'server': {'title': '服务器', 'badge': ('正常', 'good'), 'rows': []},
-                             'deployment': {'title': '订阅', 'badge': ('已部署', 'good'), 'rows': []},
-                             'notice': {'title': '已配置', 'tone': 'muted', 'lines': []},
-                             'egress': {'summary': summary, 'tone': 'warning', 'password': 'do-not-render-password'}}
-                    ui.home(model, [('install', '部署', ''), ('subscription', '订阅', ''), ('maintenance', '维护', ''), ('exit', '退出', '')])
-                    text = '\n'.join(row[2] for row in screen.writes)
-                    self.assertIn('后置出口', text)
-                    self.assertIn(summary, text)
-                    self.assertNotIn('do-not-render-password', text)
-
     def test_auto_shortcut_opens_settings_and_never_deploys(self):
         ui, _ = self.ui(['a'])
         model = {'server': {'title': '服务器', 'badge': ('正常', 'good'), 'rows': []},
@@ -158,7 +143,7 @@ class TerminalTests(unittest.TestCase):
     def test_secret_input_masks_value_preserves_spaces_and_accepts_question_marks(self):
         password = ' Pa?ss中 '
         ui, screen = self.ui(['\n'], (20, 52))
-        self.assertEqual(ui.ask('出口', 'SOCKS5 密码', default=password, secret=True), password)
+        self.assertEqual(ui.ask('凭据', '密码', default=password, secret=True), password)
         rendered = '\n'.join(row[2] for row in screen.writes)
         self.assertNotIn(password, rendered)
         self.assertNotIn('Pa?ss', rendered)
@@ -172,7 +157,7 @@ class TerminalTests(unittest.TestCase):
         def reject(value):
             raise ValueError('Rejected password: ' + value)
         with self.assertRaises(tui.Cancelled):
-            ui.ask('出口', '密码', reject, default=password, secret=True)
+            ui.ask('凭据', '密码', reject, default=password, secret=True)
         rendered = '\n'.join(row[2] for row in screen.writes)
         self.assertNotIn(password, rendered)
         self.assertIn('输入无效', rendered)
@@ -185,7 +170,7 @@ class TerminalTests(unittest.TestCase):
 
     def test_username_can_preserve_authentication_whitespace(self):
         ui, _ = self.ui(['\n'])
-        self.assertEqual(ui.ask('后置出口', '用户名', default=' user ', preserve_whitespace=True), ' user ')
+        self.assertEqual(ui.ask('凭据', '用户名', default=' user ', preserve_whitespace=True), ' user ')
 
     def test_destructive_confirmation_defaults_to_cancel(self):
         ui, _ = self.ui(['\n'])
