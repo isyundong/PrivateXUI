@@ -132,8 +132,11 @@ class Cloudflare:
         if body is None:
             return None
         value = body.get('result')
-        if not isinstance(value, dict) or not value.get('id') or not isinstance(value.get('rules'), list):
+        if not isinstance(value, dict) or not value.get('id') or not isinstance(value.get('rules', []), list):
             raise APIError('GET', path, 'invalid-ruleset')
+        # Cloudflare omits rules for an existing empty phase entry point.
+        # Only a missing field is empty; explicit null or malformed rules still fail.
+        value.setdefault('rules', [])
         return value
 
     def add_rule(self, zone_id, phase, rule):

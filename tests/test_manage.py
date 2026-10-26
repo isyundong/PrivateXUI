@@ -417,6 +417,43 @@ class APIClientTests(unittest.TestCase):
         with patch.object(cf, 'envelope', return_value={'success': True, 'result': None}), self.assertRaises(APIError):
             cf.ruleset('zone', 'http_request_origin')
 
+    def test_empty_ruleset_without_rules_allows_cleanup_and_incremental_add(self):
+        for phase in ('http_request_origin', 'http_config_settings'):
+            with self.subTest(phase=phase):
+                cf = Cloudflare('fake')
+                body = {'success': True, 'result': {
+                    'id': 'empty-ruleset', 'kind': 'zone', 'phase': phase,
+                    'name': 'zone', 'version': '1',
+                }}
+                cf.opener.open = Mock(side_effect=lambda *a, **kw: io.BytesIO(json.dumps(body).encode()))
+                with patch.object(cf, 'call') as call:
+                    cf.remove_rules('zone', phase, {'ours'})
+                    call.assert_not_called()
+                    rule = {'ref': 'ours', 'action': 'route'}
+                    cf.add_rule('zone', phase, rule)
+                    call.assert_called_once_with('POST', '/zones/zone/rulesets/empty-ruleset/rules', rule)
+
+    def test_invalid_ruleset_shapes_still_block_cleanup_without_mutations(self):
+        results = [None, [], {}, {'rules': []}, {'id': ''},
+                   *({'id': 'ruleset', 'rules': rules} for rules in (None, {}, '', 0, False))]
+        for result in results:
+            with self.subTest(result=result):
+                cf = Cloudflare('fake')
+                with patch.object(cf, 'envelope', return_value={'success': True, 'result': result}), \
+                        patch.object(cf, 'call') as call:
+                    with self.assertRaises(APIError):
+                        cf.remove_rules('zone', 'http_request_origin', {'ours'})
+                    call.assert_not_called()
+
+    def test_rule_cleanup_preserves_unrelated_business_rules(self):
+        cf = Cloudflare('fake')
+        body = {'success': True, 'result': {'id': 'ruleset', 'rules': [
+            {'ref': 'business', 'id': 'business-rule'}, {'ref': 'ours', 'id': 'our-rule'},
+        ]}}
+        with patch.object(cf, 'envelope', return_value=body), patch.object(cf, 'call') as call:
+            cf.remove_rules('zone', 'http_request_origin', {'ours'})
+            call.assert_called_once_with('DELETE', '/zones/zone/rulesets/ruleset/rules/our-rule', missing_ok=True)
+
     def test_rule_add_is_incremental_not_full_list_replacement(self):
         cf = Cloudflare('fake')
         with patch.object(cf, 'ruleset', return_value={'id': 'ruleset', 'rules': [{'ref': 'business'}]}), patch.object(cf, 'call') as call:
